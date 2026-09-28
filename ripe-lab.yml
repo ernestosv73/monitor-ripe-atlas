@@ -1,0 +1,11 @@
+name: ripe-lab
+mgmt:
+  network: ripe-lab
+  #ipv4-subnet: 172.90.90.0/24
+
+topology:
+  nodes:
+    anaconda:
+      kind: linux
+      image: anaconda/miniconda:latest 
+      
