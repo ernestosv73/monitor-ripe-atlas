@@ -10,4 +10,7 @@ pip install pandas
 sleep 1
 pip install scikit-learn
 sleep 1
+apt install gfortran -y
+sleep 1
+
 
