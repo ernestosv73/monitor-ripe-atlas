@@ -8,4 +8,10 @@ topology:
     anaconda:
       kind: linux
       image: anaconda/miniconda:latest 
+      binds:
+       - configs/dependencies.sh:/root/dependencies.sh
+      exec:
+       #- python3 -m pip config set global.break-system-packages true
+       - chmod +x /root/dependencies.sh
+       - bash /root/dependencies.sh    
       
