@@ -5,13 +5,14 @@ mgmt:
 
 topology:
   nodes:
-    anaconda:
+    colector:
       kind: linux
-      image: anaconda/miniconda:latest 
+      image: docker.io/esanchezv/kali-python3:latest 
       binds:
        - configs/dependencies.sh:/root/dependencies.sh
       exec:
-       #- python3 -m pip config set global.break-system-packages true
+       - python3 -m pip config set global.break-system-packages true
        - chmod +x /root/dependencies.sh
        - bash /root/dependencies.sh    
       
+ 
