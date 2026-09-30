@@ -2,14 +2,23 @@ apt update
 sleep 1
 apt install curl mtr python3-dev build-essential libssl-dev libffi-dev -y
 sleep 1
-apt install -y gcc g++ gfortran libopenblas-dev liblapack-dev pkg-config python3-pip python3-dev
-sleep 1
-apt install git -y
+pip install pandas
 sleep 1
 apt install python3-numpy -y
 sleep 1
 pip install pandas
 sleep 1
-pip install scikit-learn
+pip install scipy
 sleep 1
-
+pip install ripe.atlas.cousteau
+sleep 1
+pip install ripe.atlas.sagan
+sleep 1
+pip install ripe-atlas-tools
+sleep 1
+apt install python3-psycopg2 -y
+sleep 1
+pip install ipwhois --break-system-packages
+sleep 1
+pip install ruptures
+sleep 1
