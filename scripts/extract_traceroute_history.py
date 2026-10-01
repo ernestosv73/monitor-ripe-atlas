@@ -50,9 +50,11 @@ def parse_arguments():
     parser.add_argument("--output", "-o", type=str, default=None)
     parser.add_argument("--resolve-asn", action="store_true",
                          help="Resolver ASN vía whois (más lento, requiere red)")
-    parser.add_argument("--ground-truth-output", type=str, default=None,
+    parser.add_argument("--ground-truth-output", type=str, nargs="?", const="__auto__", default=None,
                          help="Exportar eventos clasificados a CSV (timestamp,categoria) para "
-                              "usar con detect_changepoints_ripe.py --ground-truth")
+                              "usar con detect_changepoints_ripe.py --ground-truth. Si se usa sin "
+                              "valor, el nombre se genera automáticamente incluyendo measurement "
+                              "ID y probe ID (ej. eventos_measurement<id>_probe<id>.csv).")
     return parser.parse_args()
 
 
@@ -387,13 +389,16 @@ def main():
         prev_timeout_slots = cycle['timeout_slots']
 
     # 4. Guardar CSV
-    output_file = args.output or f"historial_traceroute_probe_{args.probe_id}.csv"
+    output_file = args.output or f"historial_traceroute_measurement{args.measurement_id}_probe{args.probe_id}.csv"
     pd.DataFrame(csv_rows).to_csv(output_file, index=False)
     print(f"\n💾 Datos detallados guardados en: {output_file}")
 
     if args.ground_truth_output:
-        n_exportadas = exportar_ground_truth(anomalies_per_cycle, args.ground_truth_output)
-        print(f"💾 {n_exportadas} eventos de ground truth exportados a: {args.ground_truth_output}")
+        gt_output = args.ground_truth_output
+        if gt_output == "__auto__":
+            gt_output = f"eventos_measurement{args.measurement_id}_probe{args.probe_id}.csv"
+        n_exportadas = exportar_ground_truth(anomalies_per_cycle, gt_output)
+        print(f"💾 {n_exportadas} eventos de ground truth exportados a: {gt_output}")
 
     # 5. Reporte
     print(f"\n📊 Resumen de Cambios Detectados:")
