@@ -10,6 +10,7 @@ topology:
       image: docker.io/esanchezv/kali-python3:latest 
       binds:
        - configs/dependencies.sh:/root/dependencies.sh
+       - configs/resolv.conf:/etc/resolv.conf
        - scripts:/root/scripts
       exec:
        - python3 -m pip config set global.break-system-packages true
