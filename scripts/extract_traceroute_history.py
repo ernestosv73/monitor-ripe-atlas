@@ -155,7 +155,7 @@ def main():
     stop_time = parse_dt(args.stop_time)
 
     print("=" * 70)
-    print("EXTRACCIÓN Y ANÁLISIS DE TRACEROUTE (RIPE Atlas) — versión corregida")
+    print("EXTRACCIÓN Y ANÁLISIS DE TRACEROUTE (RIPE Atlas)")
     print("=" * 70)
     print(f"\n⚙️  Configuración:")
     print(f"   Measurement ID: {args.measurement_id}")
@@ -259,7 +259,7 @@ def main():
     # "1 change" al ENTRAR a un pico Y otro "1 change" al SALIR de él -- un
     # solo evento produce DOS cambios, porque compara pares consecutivos, no
     # contra una mediana histórica.
-    print("\n🔎 Analizando ciclos en busca de anomalías (comparación consecutiva)...")
+    print("\n🔎 Analizando ciclos en busca de cambios (comparación consecutiva)...")
     anomalies_per_cycle = []
     csv_rows = []
     prev_hops_by_num = {}   # {hop_num: {'ip', 'rtt', 'asn'}} del ciclo ANTERIOR
@@ -396,9 +396,9 @@ def main():
         print(f"💾 {n_exportadas} eventos de ground truth exportados a: {args.ground_truth_output}")
 
     # 5. Reporte
-    print(f"\n📊 Resumen de Anomalías Detectadas:")
+    print(f"\n📊 Resumen de Cambios Detectados:")
     print(f"   Ciclos totales analizados: {len(cycles_data)}")
-    print(f"   Ciclos con anomalías: {len(anomalies_per_cycle)} "
+    print(f"   Ciclos con cambios: {len(anomalies_per_cycle)} "
           f"({100*len(anomalies_per_cycle)/max(1, len(cycles_data)):.1f}%)")
 
     # ✅ Desglose por categoría -- cuenta cada LÍNEA de anomalía (no ciclo,
@@ -410,7 +410,7 @@ def main():
         'rtt_dark': 'RTT - Dark (>200%)', 'rtt_medium': 'RTT - Medium (40-200%)',
         'rtt_light': 'RTT - Light (20-40%)', 'cambio_ip_asn': 'Cambio de IP/ASN en un salto',
         'cambio_longitud': 'Cambio de longitud (con 🔴 real acompañante)',
-        'cambio_destino': 'Cambio de destino (dst_addr)', 'perdida_intermedia': 'Pérdida intermedia aumentó',
+        'cambio_destino': 'Cambio de destino (dst_addr)', 'perdida_intermedia': 'Pérdida intermedia',
     }
     conteo = Counter()
     conteo_info = Counter()
@@ -427,12 +427,12 @@ def main():
         for categoria, cantidad in conteo.most_common():
             print(f"   {categoria:45s}: {cantidad}")
     if conteo_info:
-        print(f"\nℹ️ Informativo, no cuenta como anomalía:")
+        print(f"\nℹ️ Informativo, no cuenta como cambio:")
         for categoria, cantidad in conteo_info.most_common():
             print(f"   {categoria:45s}: {cantidad}")
 
     if anomalies_per_cycle:
-        print(f"\n🔗 Los {len(anomalies_per_cycle)} ciclos con anomalías (orden cronológico):")
+        print(f"\n🔗 Los {len(anomalies_per_cycle)} ciclos con cambios (orden cronológico):")
         for item in anomalies_per_cycle:
             print(f"\n   🕒 {item['timestamp']} UTC:")
             for anom in item['anomalies']:
