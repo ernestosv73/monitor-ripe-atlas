@@ -18,6 +18,15 @@ Correcciones acumuladas respecto a la versión original:
    línea base histórica global -- confirmado con evidencia real: un
    mismo pico genera DOS "changes" en Path Analysis (entrada y salida),
    algo que una comparación contra línea base global no puede replicar.
+6. ✅ FIX #13 (2026-10-02) — Pérdida intermedia DEJA de contar como
+   'change': se valida empíricamente (measurement 182939148, probe
+   1009160, racha 28-29 jun 2026) que el conteo de 'Ciclos con cambios'
+   del script reproduce EXACTO el de Path Analysis (8/8) una vez que
+   solo se consideran 🟣🔴🟡🟠 -- Path Analysis no contempla pérdida
+   intermedia como 'change'. Se sigue detectando y exportando al CSV de
+   ground truth (para observarla en el visor HTML), pero en una lista
+   aparte (perdida_log) que ya NO alimenta 'cycle_anomalies' ni
+   'Ciclos con cambios'.
 """
 import argparse
 import sys
@@ -125,7 +134,7 @@ def clasificar_anomalia(anom):
     return None  # ℹ️, ⚪ -- informativo, no cuenta
 
 
-def exportar_ground_truth(anomalies_per_cycle, output_path):
+def exportar_ground_truth(anomalies_per_cycle, perdida_log, output_path):
     """
     Exporta los eventos clasificados a un CSV (columnas timestamp,categoria)
     -- una fila por cada anomalía INDIVIDUAL (no por ciclo), para poder
@@ -136,14 +145,26 @@ def exportar_ground_truth(anomalies_per_cycle, output_path):
     2026-03-04 05:34, cambio de ASN sin degradación visible en destino) --
     poder filtrar a 'rtt_*' específicamente da una comparación más justa
     contra lo que PELT puede, en principio, encontrar.
+
+    ✅ FIX #13 -- 'perdida_intermedia' ya NO se deriva de 'anomalies_per_cycle'
+    (ahí solo quedan cambios reales, ver main()): se recibe aparte desde
+    'perdida_log' para que siga observable en el CSV/visor HTML sin volver
+    a contar como 'change' en ningún resumen.
     """
     rows = []
     for item in anomalies_per_cycle:
         for anom in item['anomalies']:
             categoria = clasificar_anomalia(anom)
-            if categoria is not None:
+            # 'perdida_intermedia' puede aparecer acá como línea informativa
+            # (cycle_info) cuando coincide con un cambio real del mismo ciclo;
+            # se omite para no duplicarla -- 'perdida_log' es su única fuente.
+            if categoria is not None and categoria != 'perdida_intermedia':
                 rows.append({'timestamp': item['timestamp'], 'categoria': categoria})
+    for item in perdida_log:
+        rows.append({'timestamp': item['timestamp'], 'categoria': 'perdida_intermedia'})
     df = pd.DataFrame(rows)
+    if not df.empty:
+        df = df.sort_values('timestamp').reset_index(drop=True)
     df.to_csv(output_path, index=False)
     return len(df)
 
@@ -197,6 +218,8 @@ def main():
         hops = res.get('result', [])
         dst_addr = res.get('dst_addr', 'Unknown')
         dst_responded = res.get('destination_ip_responded', None)  # ✅ FIX #9
+        if dst_addr not in ('Unknown', None, '*'):
+            ips_unicas.add(dst_addr)  # ✅ FIX #12 -- se resuelve también su ASN
 
         cycle_hops = []
         current_len = 0
@@ -236,6 +259,7 @@ def main():
                 'hops': cycle_hops,
                 'length': current_len,
                 'dst_addr': dst_addr,
+                'dst_asn': None,
                 'dst_responded': dst_responded,
                 'timeout_slots': timeout_slots,
             })
@@ -250,6 +274,8 @@ def main():
         for cycle in cycles_data:
             for h in cycle['hops']:
                 h['asn'] = resolver_asn(h['ip'])
+            if cycle['dst_addr'] not in ('Unknown', None, '*'):
+                cycle['dst_asn'] = resolver_asn(cycle['dst_addr'])
     else:
         print("\n🌐 Resolución de ASN desactivada (usar --resolve-asn para activarla).")
 
@@ -262,11 +288,15 @@ def main():
     # solo evento produce DOS cambios, porque compara pares consecutivos, no
     # contra una mediana histórica.
     print("\n🔎 Analizando ciclos en busca de cambios (comparación consecutiva)...")
-    anomalies_per_cycle = []
+    anomalies_per_cycle = []  # SOLO cambios reales (🟣🔴🟡🟠) -- determina 'Ciclos
+                              # con cambios' y es lo comparable 1:1 contra Path Analysis
+    perdida_log = []          # 📉 pérdida intermedia -- observacional, YA NO cuenta
+                              # como 'change' (FIX #13), pero sigue yendo al CSV/HTML
     csv_rows = []
     prev_hops_by_num = {}   # {hop_num: {'ip', 'rtt', 'asn'}} del ciclo ANTERIOR
     prev_length = None
     prev_dst_addr = None
+    prev_dst_asn = None
     prev_timeout_slots = None
 
     for cycle in cycles_data:
@@ -280,11 +310,35 @@ def main():
         # resolvió a un PoP distinto (Amsterdam->Frankfurt) durante el episodio
         # del 2026-04-02 -- lo que antes se interpretaba como 'cambio de AS-path'
         # era, en realidad, redirección DNS/anycast hacia un destino distinto.
+        # ✅ FIX #12 — igual que FIX #6 para los saltos intermedios: un
+        # dst_addr que alterna DENTRO DEL MISMO ASN es balanceo de carga /
+        # ECMP en el borde del proveedor (ej. Cloudflare AS13335 alternando
+        # entre dos direcciones del mismo nodo anycast), no una redirección
+        # real hacia otro destino/PoP. Confirmado con evidencia real
+        # (measurement 182939148, probe 1009160, muestra 23-25 jun 2026):
+        # dst_addr alterna entre solo 2 valores dentro de AS13335, con RTT
+        # prácticamente idéntico (~12-14ms) en ambos casos -- no hay indicio
+        # de redirección geográfica. Requiere --resolve-asn; sin la flag, se
+        # mantiene el comportamiento anterior (cualquier cambio de dst_addr
+        # cuenta, porque no hay forma de saber si es el mismo ASN).
         if prev_dst_addr is not None and cycle['dst_addr'] != prev_dst_addr:
-            cycle_anomalies.append(
-                f"🟠 Destino cambió: {cycle['dst_addr']} (Anterior: {prev_dst_addr}) "
-                f"— probable redirección DNS/anycast, no cambio de ruta hacia el mismo destino"
+            dst_asn = cycle['dst_asn']
+            mismo_asn_dst = args.resolve_asn and (
+                (dst_asn not in (None, 'Unknown') and dst_asn == prev_dst_asn)
+                or (dst_asn in (None, 'Unknown') and prev_dst_asn in (None, 'Unknown'))
             )
+            if mismo_asn_dst:
+                motivo = f"mismo ASN {dst_asn}" if dst_asn not in (None, 'Unknown') else "ASN no resoluble en ningún lado"
+                cycle_info.append(
+                    f"ℹ️ Destino cambió: {cycle['dst_addr']} (Anterior: {prev_dst_addr}) — {motivo}, "
+                    f"NO cuenta como cambio (balanceo de carga interno)"
+                )
+            else:
+                etiqueta_asn = f", ASN {prev_dst_asn}->{dst_asn}" if args.resolve_asn else ""
+                cycle_anomalies.append(
+                    f"🟠 Destino cambió: {cycle['dst_addr']} (Anterior: {prev_dst_addr}{etiqueta_asn}) "
+                    f"— probable redirección DNS/anycast, no cambio de ruta hacia el mismo destino"
+                )
 
         # 🟡 Cambio de longitud vs. el ciclo INMEDIATAMENTE anterior
         # ✅ FIX #9 (simplificado) — en vez de perseguir causas técnicas
@@ -307,11 +361,26 @@ def main():
         # de ruta genuino -- es una señal real de pérdida, pero de una
         # naturaleza distinta a las otras 3 categorías, y merece su propio
         # registro en vez de perderse o confundirse con 'Path Length'.
+        #
+        # ✅ FIX #13 (2026-10-02) — DEJA de agregarse a 'cycle_anomalies':
+        # validado empíricamente que Path Analysis NO cuenta la pérdida
+        # intermedia como 'change' (measurement 182939148, racha 28-29 jun
+        # 2026: el script reproduce 8/8 'changes' de Path Analysis sin
+        # necesidad de incluirla). Se guarda en 'perdida_msg' para: (a)
+        # mostrarse igual junto a un cambio real del MISMO ciclo si lo hay
+        # (como antes), vía cycle_info, y (b) registrarse siempre en
+        # 'perdida_log', exista o no otro cambio en el ciclo, para que
+        # 'exportar_ground_truth' la siga volcando al CSV que lee el visor
+        # HTML -- sin que infle 'Ciclos con cambios' ni el desglose de
+        # categorías reales.
+        perdida_msg = None
         if prev_timeout_slots is not None and cycle['timeout_slots'] > prev_timeout_slots:
-            cycle_anomalies.append(
+            perdida_msg = (
                 f"📉 Pérdida intermedia aumentó: {cycle['timeout_slots']} saltos sin respuesta "
-                f"(Anterior: {prev_timeout_slots}) — sin cambio de ruta ni degradación de RTT al destino"
+                f"(Anterior: {prev_timeout_slots}) — informativo, no cuenta como cambio de ruta"
             )
+            cycle_info.append(perdida_msg)
+            perdida_log.append({'timestamp': dt_str, 'ts_ms': cycle['ts_ms'], 'mensaje': perdida_msg})
 
         for h in cycle['hops']:
             hop_num, rtt, ip, asn = h['hop'], h['rtt'], h['ip'], h['asn']
@@ -320,14 +389,41 @@ def main():
             if prev_h is not None:
                 prev_rtt, prev_ip, prev_asn = prev_h['rtt'], prev_h['ip'], prev_h['asn']
 
-                # 🟣 RTT: diferencia contra el ciclo ANTERIOR, no la mediana global
-                rtt_diff = abs(rtt - prev_rtt)
-                rtt_pct = (rtt_diff / prev_rtt * 100) if prev_rtt > 0 else 0
-                if rtt_diff > 10.0 and rtt_pct > 20.0:
-                    severidad = clasificar_severidad(rtt_pct)
-                    cycle_anomalies.append(
-                        f"{severidad} Hop {hop_num} RTT: {rtt:.1f}ms (Anterior: {prev_rtt:.1f}ms, +{rtt_pct:.0f}%)"
-                    )
+                # Se determina PRIMERO si el salto cambió de IP dentro del MISMO
+                # ASN (balanceo de carga interno / ECMP, FIX #6 más abajo), para
+                # poder usarlo también en el chequeo de RTT que sigue.
+                # ✅ FIX #7 — ASN 'Unknown' en AMBOS lados (típico de IPs
+                # privadas, ej. 10.226.x.x) se trata igual que 'mismo ASN'.
+                # Confirmado con evidencia exacta: excluir 'Unknown' de esta
+                # regla dejaba 4 ciclos de más marcados (33 vs 29 reales) --
+                # los 4 correspondían EXACTAMENTE a saltos con IP privada
+                # alternando sin ningún ASN público resoluble en ningún lado.
+                # Sin evidencia de un ASN real distinto, no hay base para
+                # contarlo como cambio genuino.
+                ip_changed = ip != 'Unknown' and prev_ip != 'Unknown' and ip != prev_ip
+                mismo_asn = ip_changed and args.resolve_asn and (
+                    (asn not in (None, 'Unknown') and asn == prev_asn)
+                    or (asn in (None, 'Unknown') and prev_asn in (None, 'Unknown'))
+                )
+
+                # 🟣 RTT: diferencia contra el ciclo ANTERIOR, no la mediana global.
+                # ✅ FIX #11 — se omite la comparación de RTT cuando el salto
+                # cambió de IP por balanceo de carga interno (mismo ASN, FIX #6):
+                # dos rutas ECMP paralelas dentro del mismo ASN pueden tener un
+                # RTT base distinto sin que exista degradación real -- comparar
+                # el RTT de un camino contra el de OTRO camino paralelo genera
+                # falsos positivos. Confirmado con evidencia real (measurement
+                # 182939148, probe 1009160: hops 3-6 y 9 alternan de IP dentro
+                # de AS6697/AS13335 entre ciclos consecutivos, sin cambio de ruta
+                # real, pero con RTT base ligeramente distinto en cada camino).
+                if not mismo_asn:
+                    rtt_diff = abs(rtt - prev_rtt)
+                    rtt_pct = (rtt_diff / prev_rtt * 100) if prev_rtt > 0 else 0
+                    if rtt_diff > 10.0 and rtt_pct > 20.0:
+                        severidad = clasificar_severidad(rtt_pct)
+                        cycle_anomalies.append(
+                            f"{severidad} Hop {hop_num} RTT: {rtt:.1f}ms (Anterior: {prev_rtt:.1f}ms, +{rtt_pct:.0f}%)"
+                        )
 
                 # 🔴 IP y/o ASN: distintos a los del ciclo ANTERIOR en la misma posición
                 # ✅ FIX #6 — un cambio de IP DENTRO DEL MISMO ASN (balanceo de
@@ -339,19 +435,7 @@ def main():
                 # no a 'cycle_anomalies'. Requiere --resolve-asn; sin la flag,
                 # se mantiene el comportamiento anterior (cualquier cambio de
                 # IP cuenta, porque no hay forma de saber si es el mismo ASN).
-                if ip != 'Unknown' and prev_ip != 'Unknown' and ip != prev_ip:
-                    # ✅ FIX #7 — ASN 'Unknown' en AMBOS lados (típico de IPs
-                    # privadas, ej. 10.226.x.x) se trata igual que 'mismo ASN'.
-                    # Confirmado con evidencia exacta: excluir 'Unknown' de esta
-                    # regla dejaba 4 ciclos de más marcados (33 vs 29 reales) --
-                    # los 4 correspondían EXACTAMENTE a saltos con IP privada
-                    # alternando sin ningún ASN público resoluble en ningún lado.
-                    # Sin evidencia de un ASN real distinto, no hay base para
-                    # contarlo como cambio genuino.
-                    mismo_asn = args.resolve_asn and (
-                        (asn not in (None, 'Unknown') and asn == prev_asn)
-                        or (asn in (None, 'Unknown') and prev_asn in (None, 'Unknown'))
-                    )
+                if ip_changed:
                     if mismo_asn:
                         motivo = f"mismo ASN {asn}" if asn not in (None, 'Unknown') else "IP privada, sin ASN público resoluble en ningún lado"
                         cycle_info.append(
@@ -386,6 +470,7 @@ def main():
         prev_hops_by_num = current_hops_by_num
         prev_length = cycle['length']
         prev_dst_addr = cycle['dst_addr']
+        prev_dst_asn = cycle['dst_asn']
         prev_timeout_slots = cycle['timeout_slots']
 
     # 4. Guardar CSV
@@ -397,7 +482,7 @@ def main():
         gt_output = args.ground_truth_output
         if gt_output == "__auto__":
             gt_output = f"eventos_measurement{args.measurement_id}_probe{args.probe_id}.csv"
-        n_exportadas = exportar_ground_truth(anomalies_per_cycle, gt_output)
+        n_exportadas = exportar_ground_truth(anomalies_per_cycle, perdida_log, gt_output)
         print(f"💾 {n_exportadas} eventos de ground truth exportados a: {gt_output}")
 
     # 5. Reporte
@@ -422,10 +507,16 @@ def main():
     for item in anomalies_per_cycle:
         for anom in item['anomalies']:
             categoria = clasificar_anomalia(anom)
-            if categoria is not None:
+            # ✅ FIX #13 -- 'perdida_intermedia' puede aparecer acá solo como
+            # línea informativa (cycle_info) junto a un cambio real del mismo
+            # ciclo; se excluye de 'conteo' (cambios reales) y se contabiliza
+            # aparte más abajo desde 'perdida_log', su única fuente de verdad.
+            if categoria is not None and categoria != 'perdida_intermedia':
                 conteo[NOMBRES_CATEGORIA[categoria]] += 1
             elif anom.startswith('⚪'):
                 conteo_info['Longitud sospechosa (sin 🔴 real, no cuenta)'] += 1
+    if perdida_log:
+        conteo_info['Pérdida intermedia (informativo, no cuenta como cambio)'] = len(perdida_log)
 
     if conteo:
         print(f"\n📋 Desglose por categoría ({sum(conteo.values())} líneas totales):")
@@ -446,6 +537,19 @@ def main():
                    f"measurementId={args.measurement_id}&sourceProbeId={args.probe_id}&"
                    f"center={item['ts_ms']}&window=7200000")
             print(f"      🔗 URL: {url}")
+
+    # ✅ FIX #13 -- listado aparte, solo informativo, de los ciclos donde la
+    # ÚNICA señal fue pérdida intermedia (no están en 'anomalies_per_cycle'
+    # porque ya no cuentan como cambio). Los que coincidieron con un cambio
+    # real ya se imprimieron arriba, dentro de ese ciclo -- se excluyen acá
+    # para no duplicarlos.
+    timestamps_con_cambio_real = {item['timestamp'] for item in anomalies_per_cycle}
+    perdida_aislada = [p for p in perdida_log if p['timestamp'] not in timestamps_con_cambio_real]
+    if perdida_aislada:
+        print(f"\n📉 {len(perdida_aislada)} ciclos con pérdida intermedia AISLADA "
+              f"(observacional, NO cuentan como cambio):")
+        for item in perdida_aislada:
+            print(f"   🕒 {item['timestamp']} UTC — {item['mensaje']}")
 
     print("\n✅ ¡Proceso completado!")
 
