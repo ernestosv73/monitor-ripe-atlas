@@ -1,0 +1,1360 @@
+<title>Monitor de Trayectorias BGP — RIPE Atlas</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  /* Layout: barra superior fija (carga de datos) + tarjetas de resumen +
+     grafico de linea de tiempo (SVG) + leyenda-filtro + tabla de eventos.
+     Paleta: fondo tecnico oscuro por defecto (consola de monitoreo de red),
+     con contraparte clara. Acento cian para RTT; color semantico fijo por
+     categoria de anomalia, igual en ambos temas. */
+  :root {
+    --bg: #f5f6f8;
+    --surface: #ffffff;
+    --surface-2: #eceef2;
+    --border: #d8dce3;
+    --fg: #171a21;
+    --fg-dim: #5b6270;
+    --fg-faint: #8992a3;
+    --accent: #0f7a8c;
+    --accent-fg: #ffffff;
+
+    --c-asn: #d94b4b;       /* 🔴 cambio de ASN */
+    --c-rtt: #8b5cf6;       /* 🟣 degradacion RTT */
+    --c-len: #d1a013;       /* 🟡 cambio longitud de ruta */
+    --c-dst: #e0792c;       /* 🟠 cambio de destino */
+    --c-loss: #3b7fc4;      /* 📉 perdida intermedia */
+    --c-none: #9aa2b1;      /* ⚪ sin evento */
+
+    color-scheme: light;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #10131a;
+      --surface: #171b24;
+      --surface-2: #1e232e;
+      --border: #2b3140;
+      --fg: #e8eaef;
+      --fg-dim: #a3aab8;
+      --fg-faint: #6b7284;
+      --accent: #35c2d6;
+      --accent-fg: #08191c;
+      color-scheme: dark;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #10131a;
+    --surface: #171b24;
+    --surface-2: #1e232e;
+    --border: #2b3140;
+    --fg: #e8eaef;
+    --fg-dim: #a3aab8;
+    --fg-faint: #6b7284;
+    --accent: #35c2d6;
+    --accent-fg: #08191c;
+    color-scheme: dark;
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    background: var(--bg);
+    color: var(--fg);
+    font-family: "IBM Plex Sans", system-ui, sans-serif;
+    padding-inline: 16px;
+    padding-block: 20px 48px;
+    font-size: 14px;
+    line-height: 1.45;
+  }
+  .mono { font-family: "IBM Plex Mono", ui-monospace, monospace; }
+  .tabnum { font-variant-numeric: tabular-nums; }
+
+  .wrap { max-width: 1180px; margin-inline: auto; display: flex; flex-direction: column; gap: 20px; }
+
+  header.page {
+    display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 10px;
+  }
+  header.page h1 {
+    font-size: 20px; font-weight: 700; margin: 0; letter-spacing: -0.01em;
+  }
+  header.page .sub { color: var(--fg-dim); font-size: 13px; }
+
+  /* ---- barra de datos ---- */
+  .databar {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 14px 16px;
+    display: flex; flex-wrap: wrap; align-items: center; gap: 12px;
+  }
+  .databar .status { display: flex; align-items: center; gap: 8px; min-width: 0; flex: 1 1 260px; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--fg-faint); flex: none; }
+  .dot.live { background: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 25%, transparent); }
+  .databar .filename { color: var(--fg-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+  .btn {
+    appearance: none; border: 1px solid var(--border); background: var(--surface-2); color: var(--fg);
+    padding: 8px 14px; border-radius: 8px; font: inherit; font-weight: 500; cursor: pointer;
+    display: inline-flex; align-items: center; gap: 6px; white-space: nowrap;
+  }
+  .btn:hover { border-color: var(--accent); }
+  .btn.primary { background: var(--accent); color: var(--accent-fg); border-color: transparent; }
+  .btn.primary:hover { filter: brightness(1.06); }
+  input[type=file] { display: none; }
+
+  .dropzone {
+    border: 1.5px dashed var(--border); border-radius: 10px; padding: 6px 14px;
+    color: var(--fg-faint); font-size: 12.5px; flex: 1 1 200px; text-align: center;
+    transition: border-color .15s, color .15s;
+  }
+  .dropzone.dragover { border-color: var(--accent); color: var(--accent); }
+
+  /* ---- tarjetas resumen ---- */
+  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 10px; }
+  .stat {
+    background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
+    padding: 14px 16px; display: flex; flex-direction: column; gap: 4px; min-width: 0;
+  }
+  .stat .n { font-size: 24px; font-weight: 700; font-family: "IBM Plex Mono", monospace; }
+  .stat .l { font-size: 12px; color: var(--fg-dim); }
+  .stat.cat { border-left: 3px solid var(--cat-color, var(--fg-faint)); }
+
+  /* ---- panel del grafico ---- */
+  .panel {
+    background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 16px;
+  }
+  .panel h2 {
+    font-size: 13px; text-transform: uppercase; letter-spacing: .05em; color: var(--fg-dim);
+    margin: 0 0 12px 0; font-weight: 600;
+  }
+  .chart-scroll { overflow-x: auto; }
+  #chart { display: block; min-width: 640px; }
+  #chart text { fill: var(--fg-dim); font-family: "IBM Plex Mono", monospace; }
+  #chart .grid { stroke: var(--border); stroke-width: 1; }
+  #chart .rttline { fill: none; stroke: var(--fg-faint); stroke-width: 1.25; }
+  #chart .axis { stroke: var(--border); }
+  .tick-emph { fill: var(--fg); }
+
+  .legend { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px; }
+  .chip {
+    display: inline-flex; align-items: center; gap: 7px; border: 1px solid var(--border);
+    background: var(--surface-2); border-radius: 999px; padding: 6px 12px 6px 8px; cursor: pointer;
+    font-size: 12.5px; font-weight: 500; user-select: none; transition: opacity .15s;
+  }
+  .chip .sw { width: 9px; height: 9px; border-radius: 50%; background: var(--chip-color); flex: none; }
+  .chip .n { color: var(--fg-dim); font-family: "IBM Plex Mono", monospace; }
+  .chip.off { opacity: .35; }
+
+  .point { cursor: pointer; }
+  .point:hover { stroke: var(--fg); stroke-width: 1.5; }
+
+  .tooltip {
+    position: fixed; pointer-events: none; background: var(--fg); color: var(--bg);
+    padding: 7px 10px; border-radius: 7px; font-size: 12px; font-family: "IBM Plex Mono", monospace;
+    max-width: 260px; z-index: 30; opacity: 0; transform: translate(-50%, -100%); transition: opacity .1s;
+    line-height: 1.4;
+  }
+  .tooltip.show { opacity: 1; }
+
+  /* ---- tabla ---- */
+  .table-tools { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 10px; }
+  .search {
+    flex: 1 1 200px; background: var(--surface-2); border: 1px solid var(--border); border-radius: 8px;
+    padding: 8px 10px; color: var(--fg); font: inherit;
+  }
+  .search::placeholder { color: var(--fg-faint); }
+  .table-wrap { overflow-x: auto; border: 1px solid var(--border); border-radius: 10px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; min-width: 560px; }
+  thead th {
+    text-align: left; background: var(--surface-2); color: var(--fg-dim); font-weight: 600;
+    padding: 9px 12px; position: sticky; top: 0; cursor: pointer; white-space: nowrap;
+  }
+  thead th:hover { color: var(--fg); }
+  thead th .arrow { opacity: .5; font-size: 11px; margin-left: 3px; }
+  tbody td { padding: 8px 12px; border-top: 1px solid var(--border); vertical-align: top; }
+  tbody tr:hover { background: var(--surface-2); }
+  .badge {
+    display: inline-flex; align-items: center; gap: 6px; padding: 3px 9px; border-radius: 999px;
+    font-size: 12px; font-weight: 600; background: var(--surface-2); border: 1px solid var(--border);
+  }
+  .badge .sw { width: 8px; height: 8px; border-radius: 50%; background: var(--badge-color); }
+  .empty { padding: 32px 16px; text-align: center; color: var(--fg-faint); }
+
+  /* ---- mapeo de columnas ---- */
+  .mapper {
+    background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 16px;
+    display: none; flex-direction: column; gap: 12px;
+  }
+  .mapper.show { display: flex; }
+  .mapper p { margin: 0; color: var(--fg-dim); font-size: 13px; }
+  .map-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 10px; }
+  .map-field label { display: block; font-size: 12px; color: var(--fg-dim); margin-bottom: 4px; }
+  select {
+    width: 100%; background: var(--surface-2); border: 1px solid var(--border); color: var(--fg);
+    padding: 7px 8px; border-radius: 7px; font: inherit;
+  }
+
+  footer.note { color: var(--fg-faint); font-size: 12px; text-align: center; padding-top: 4px; }
+
+  /* ---- barra de metadatos (measurement/probe/rango) ---- */
+  .metabar {
+    background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
+    padding: 10px 16px; display: flex; flex-wrap: wrap; gap: 18px; align-items: center;
+  }
+  .meta-field { display: flex; align-items: center; gap: 8px; }
+  .meta-field label { font-size: 12px; color: var(--fg-dim); white-space: nowrap; }
+  .meta-field input {
+    background: var(--surface-2); border: 1px solid var(--border); color: var(--fg);
+    padding: 5px 8px; border-radius: 6px; font: inherit; font-size: 13px; width: 110px;
+  }
+  .meta-field input.auto { color: var(--fg-dim); }
+  .meta-field span.mono { font-size: 13px; }
+
+  /* ---- selector de rango de fechas ---- */
+  .range-controls { display: flex; flex-wrap: wrap; gap: 14px; align-items: center; }
+  .range-field { display: flex; align-items: center; gap: 6px; }
+  .range-field label { font-size: 12px; color: var(--fg-dim); }
+  .range-field input[type=datetime-local] {
+    background: var(--surface-2); border: 1px solid var(--border); color: var(--fg);
+    padding: 6px 8px; border-radius: 7px; font: inherit; font-size: 13px;
+  }
+  .range-presets { display: flex; gap: 6px; flex-wrap: wrap; }
+  .range-presets .btn { padding: 6px 10px; font-size: 12.5px; }
+  .range-presets .btn.active { border-color: var(--accent); color: var(--accent); }
+  #rangeSummary { color: var(--fg-dim); font-size: 12.5px; margin-left: auto; }
+
+  /* ---- aviso liviano (solo advertencias, no un panel de debug) ---- */
+  .notice {
+    background: var(--surface); border: 1px solid var(--border); border-left: 3px solid var(--c-len);
+    border-radius: 10px; padding: 10px 14px; font-size: 13px; color: var(--fg-dim); line-height: 1.5;
+  }
+
+  @media (max-width: 480px) {
+    .stat .n { font-size: 20px; }
+  }
+</style>
+
+<div class="wrap">
+  <header class="page">
+    <div>
+      <h1>Monitor de Trayectorias BGP — RIPE Atlas</h1>
+      <div class="sub">Ciclos de traceroute con eventos de cambio categorizados</div>
+    </div>
+  </header>
+
+  <div class="metabar" id="metabar">
+    <div class="meta-field">
+      <label>Measurement ID</label>
+      <input type="text" id="metaMeasurement" placeholder="ej. 86710104">
+    </div>
+    <div class="meta-field">
+      <label>Probe ID</label>
+      <input type="text" id="metaProbe" placeholder="ej. 35268">
+    </div>
+    <div class="meta-field">
+      <label>Target</label>
+      <input type="text" id="metaTarget" placeholder="ej. 8.8.8.8">
+    </div>
+    <div class="meta-field">
+      <label>Rango</label>
+      <span class="mono" id="metaRange">—</span>
+    </div>
+  </div>
+
+  <div class="databar">
+    <div class="status">
+      <span class="dot" id="statusDot"></span>
+      <span id="statusText">Mostrando datos de ejemplo</span>
+      <span class="filename mono" id="fileName"></span>
+    </div>
+    <div class="dropzone" id="dropzone">Arrastrá un CSV acá (autodetecta el tipo), o</div>
+    <button class="btn primary" id="btnLoadRaw">Cargar mediciones crudas</button>
+    <button class="btn primary" id="btnLoadEvents">Cargar eventos</button>
+    <button class="btn" id="btnSample">Usar datos de ejemplo</button>
+    <input type="file" id="fileInputRaw" accept=".csv,text/csv">
+    <input type="file" id="fileInputEvents" accept=".csv,text/csv">
+  </div>
+
+  <div class="mapper" id="mapper">
+    <p>No reconocí automáticamente todas las columnas. Indicá qué columna de tu CSV corresponde a cada campo:</p>
+    <div class="map-grid" id="mapGrid"></div>
+    <div>
+      <button class="btn primary" id="btnApplyMap">Aplicar mapeo</button>
+    </div>
+  </div>
+
+  <div class="notice" id="loadNotice" hidden></div>
+
+  <div class="stats" id="statCards"></div>
+
+  <div class="panel" id="rangePanel" hidden>
+    <h2>Rango de visualización</h2>
+    <div class="range-controls">
+      <div class="range-field"><label>Desde</label><input type="datetime-local" id="rangeFrom"></div>
+      <div class="range-field"><label>Hasta</label><input type="datetime-local" id="rangeTo"></div>
+      <div class="range-presets">
+        <button class="btn" data-preset="24">Últimas 24h</button>
+        <button class="btn" data-preset="168">Últimos 7 días</button>
+        <button class="btn" data-preset="720">Último mes</button>
+        <button class="btn" data-preset="all">Todo</button>
+      </div>
+      <span class="mono" id="rangeSummary"></span>
+    </div>
+  </div>
+
+  <div class="panel">
+    <h2>Línea de tiempo — RTT por ciclo, coloreado por categoría de evento</h2>
+    <div class="chart-scroll"><svg id="chart" viewBox="0 0 1100 320" preserveAspectRatio="xMinYMin meet"></svg></div>
+    <div class="legend" id="legend"></div>
+  </div>
+
+  <div class="panel">
+    <h2>Eventos detectados</h2>
+    <div class="table-tools">
+      <input class="search" id="search" type="text" placeholder="Buscar por destino, categoría, nota…">
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead id="thead"></thead>
+        <tbody id="tbody"></tbody>
+      </table>
+      <div class="empty" id="emptyMsg" hidden>No hay eventos que coincidan con el filtro.</div>
+    </div>
+  </div>
+
+  <footer class="note">Datos de ejemplo generados para demostrar el formato. Para ver tus mediciones reales: cargá el CSV de mediciones crudas (<span class="mono">historial_traceroute_probe_*.csv</span>) para ver todos los ciclos, y opcionalmente el CSV de <span class="mono">--ground-truth-output</span> para superponer las categorías de cambio.</footer>
+</div>
+
+<div class="tooltip" id="tooltip"></div>
+
+<script>
+(function () {
+  "use strict";
+
+  // -------------------------------------------------------------------
+  // Definición de categorías (coincide con las 6 categorías del extractor)
+  // -------------------------------------------------------------------
+  var CATS = [
+    { key: "asn",  emoji: "🔴", label: "Cambio de ASN",         color: "var(--c-asn)"  },
+    { key: "rtt",  emoji: "🟣", label: "Degradación RTT",        color: "var(--c-rtt)"  },
+    { key: "len",  emoji: "🟡", label: "Cambio longitud de ruta",color: "var(--c-len)"  },
+    { key: "dst",  emoji: "🟠", label: "Cambio de destino",      color: "var(--c-dst)"  },
+    { key: "loss", emoji: "📉", label: "Pérdida intermedia",     color: "var(--c-loss)"},
+    { key: "none", emoji: "⚪", label: "Sin evento",             color: "var(--c-none)"}
+  ];
+  var CAT_BY_KEY = {};
+  CATS.forEach(function (c) { CAT_BY_KEY[c.key] = c; });
+
+  function resolveVar(v) {
+    // Resuelve "var(--c-asn)" a un color real leyendo el computed style,
+    // asi el JS puede usar el mismo color exacto que el CSS (ambos temas).
+    if (v.indexOf("var(") !== 0) return v;
+    var name = v.slice(4, -1).trim();
+    return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  }
+
+  function classifyLabel(raw) {
+    // Intenta mapear un texto de categoría libre (con o sin emoji) a una
+    // de las 6 claves conocidas, por palabras clave. Devuelve "none" si
+    // no reconoce nada (mejor mostrar "sin categorizar" que romper).
+    var s = (raw || "").toLowerCase();
+    if (/asn|🔴/.test(s)) return "asn";
+    if (/rtt|latenc|degrad|🟣/.test(s)) return "rtt";
+    if (/longitud|length|hop|🟡/.test(s)) return "len";
+    if (/destino|destination|dst|🟠/.test(s)) return "dst";
+    if (/pérdida|perdida|loss|timeout|📉/.test(s)) return "loss";
+    if (/ninguno|none|sin evento|⚪/.test(s)) return "none";
+    return "none";
+  }
+
+  // -------------------------------------------------------------------
+  // Parser CSV liviano (soporta comillas y comas dentro de campos)
+  // -------------------------------------------------------------------
+  function parseCSV(text) {
+    var rows = [];
+    var row = [];
+    var field = "";
+    var inQuotes = false;
+    for (var i = 0; i < text.length; i++) {
+      var c = text[i];
+      if (inQuotes) {
+        if (c === '"') {
+          if (text[i + 1] === '"') { field += '"'; i++; }
+          else inQuotes = false;
+        } else field += c;
+      } else {
+        if (c === '"') inQuotes = true;
+        else if (c === ",") { row.push(field); field = ""; }
+        else if (c === "\n" || c === "\r") {
+          if (c === "\r" && text[i + 1] === "\n") i++;
+          row.push(field); field = "";
+          if (row.length > 1 || row[0] !== "") rows.push(row);
+          row = [];
+        } else field += c;
+      }
+    }
+    if (field.length || row.length) { row.push(field); rows.push(row); }
+    if (!rows.length) return { headers: [], records: [] };
+    var headers = rows[0].map(function (h) { return h.trim(); });
+    var records = rows.slice(1).map(function (r) {
+      var o = {};
+      headers.forEach(function (h, idx) { o[h] = (r[idx] || "").trim(); });
+      return o;
+    });
+    return { headers: headers, records: records };
+  }
+
+  // -------------------------------------------------------------------
+  // Datos de ejemplo (marcados como tales en la UI)
+  // -------------------------------------------------------------------
+  function buildSampleData() {
+    var rng = mulberry32(7);
+    var cycles = [];
+    var events = [];
+    var cycle = 0;
+    var scenarios = [
+      { n: 40, cat: "none", rtt: [16, 21] },
+      { n: 3,  cat: "rtt",  rtt: [38, 52] },
+      { n: 55, cat: "none", rtt: [16, 21] },
+      { n: 2,  cat: "asn",  rtt: [30, 44] },
+      { n: 48, cat: "none", rtt: [16, 21] },
+      { n: 4,  cat: "loss", rtt: [18, 26] },
+      { n: 60, cat: "none", rtt: [16, 21] },
+      { n: 1,  cat: "dst",  rtt: [20, 30] },
+      { n: 45, cat: "none", rtt: [16, 21] },
+      { n: 2,  cat: "len",  rtt: [22, 34] },
+      { n: 70, cat: "none", rtt: [16, 21] },
+      { n: 2,  cat: "rtt",  rtt: [95, 130] },
+      { n: 1,  cat: "burst", rtt: [40, 60] }, // varios cambios simultáneos, como una redirección real
+      { n: 50, cat: "none", rtt: [16, 21] }
+    ];
+    var destinations = ["8.8.8.8", "amsterdam-pop.example.net", "1.1.1.1"];
+    var asns = ["AS15169", "AS13335", "AS3356", "AS7018"];
+    scenarios.forEach(function (s) {
+      for (var i = 0; i < s.n; i++) {
+        cycle++;
+        var ts = isoFromCycle(cycle);
+        var rtt = s.rtt[0] + rng() * (s.rtt[1] - s.rtt[0]);
+        var dst = destinations[Math.floor(rng() * destinations.length)];
+        cycles.push({ cycle_number: cycle, timestamp: ts, rtt_ms: rtt.toFixed(1), dst_addr: dst });
+        if (s.cat === "burst") {
+          // Un mismo ciclo con varios cambios a la vez (longitud + destino +
+          // ASN), como el caso real de una redirección DNS/anycast — para
+          // que la muestra también ejercite ese caso.
+          ["len", "dst", "asn"].forEach(function (k) {
+            events.push({ cycle_number: cycle, timestamp: ts, categoria: CAT_BY_KEY[k].emoji + " " + CAT_BY_KEY[k].label, rtt_ms: rtt.toFixed(1), dst_addr: dst, nota: sampleNote(k, asns, rng) });
+          });
+        } else if (s.cat !== "none") {
+          events.push({ cycle_number: cycle, timestamp: ts, categoria: CAT_BY_KEY[s.cat].emoji + " " + CAT_BY_KEY[s.cat].label, rtt_ms: rtt.toFixed(1), dst_addr: dst, nota: sampleNote(s.cat, asns, rng) });
+        }
+      }
+    });
+    return { cycles: cycles, events: events };
+  }
+  function sampleNote(cat, asns, rng) {
+    if (cat === "asn") return "cambio " + asns[0] + " → " + asns[1 + Math.floor(rng() * 2)];
+    if (cat === "dst") return "redirección GeoDNS detectada";
+    if (cat === "loss") return "timeout_slots incrementado";
+    if (cat === "len") return "acompañado de cambio real de ASN";
+    if (cat === "rtt") return "degradación sostenida sobre línea base";
+    return "";
+  }
+  function isoFromCycle(c) {
+    var base = new Date("2026-08-01T00:00:00Z").getTime();
+    return new Date(base + c * 15 * 60 * 1000).toISOString().replace("T", " ").slice(0, 16);
+  }
+  function mulberry32(a) {
+    return function () {
+      a |= 0; a = (a + 0x6D2B79F5) | 0;
+      var t = Math.imul(a ^ (a >>> 15), 1 | a);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+
+  // -------------------------------------------------------------------
+  // Estado
+  // -------------------------------------------------------------------
+  var state = {
+    records: [],         // eventos (uno por evento real, nunca deduplicados por ciclo): {cycle, ts, tsMs, catKey, catRaw, rtt, dst, note}
+    cycleRecs: [],       // línea base: un registro por ciclo crudo (sin categoría), usado para la línea de RTT y el total de ciclos
+    activeCats: {},      // filtro de categorías activas
+    sort: { key: "cycle", dir: 1 },
+    query: "",
+    csvHeaders: [],      // almacenamiento temporal para el mapeo manual (solo eventos)
+    csvRecords: [],
+    pendingMap: null,
+    isEventOnly: false,
+    rawCycles: [],       // ciclos derivados del archivo de mediciones crudas (uno por timestamp)
+    rawFilename: null,
+    eventsRaw: [],       // eventos normalizados del archivo de ground-truth
+    eventsFilename: null,
+    lastLoadInfo: [],    // avisos/advertencias de la última carga (solo lo accionable, no un log de debug)
+    meta: { measurementId: "", probeId: "", target: "", rangeStart: null, rangeEnd: null },
+    metaIsSample: true,        // true mientras los valores de meta vienen del ejemplo (se limpian al cargar datos reales)
+    metaUserEdited: { measurementId: false, probeId: false, target: false }, // true solo si el usuario tipeó ahí (nunca se pisa)
+    filterFrom: null,    // recorte de fechas para el gráfico/tabla (ms); null = sin recorte
+    filterTo: null,
+    fullMin: null,       // límites reales de los datos cargados (para los presets y los <input>)
+    fullMax: null
+  };
+  CATS.forEach(function (c) { state.activeCats[c.key] = true; });
+
+  var FIELD_GUESSES = {
+    cycle: ["cycle_number", "cycle", "ciclo", "n_ciclo", "sample", "step"],
+    ts: ["timestamp", "time", "fecha", "datetime", "ts"],
+    cat: ["categoria", "category", "categoría", "tipo_evento", "event_type", "label", "class"],
+    rtt: ["rtt_ms", "rtt", "latency_ms", "latencia", "rtt(ms)"],
+    dst: ["dst_addr", "destination", "destino", "dst", "target"],
+    note: ["nota", "note", "detalle", "detail", "observacion", "observación", "comment"],
+    hop: ["hop", "hop_number", "nhop", "ttl"],
+    ip: ["ip", "hop_ip", "address", "addr"],
+    asn: ["asn", "hop_asn", "as_number", "asn_number"]
+  };
+
+  function guessColumn(headers, key) {
+    var candidates = FIELD_GUESSES[key];
+    var lower = headers.map(function (h) { return h.toLowerCase(); });
+    for (var i = 0; i < candidates.length; i++) {
+      var idx = lower.indexOf(candidates[i]);
+      if (idx !== -1) return headers[idx];
+    }
+    return null;
+  }
+
+  function detectFileKind(headers) {
+    // El archivo de mediciones crudas (historial_traceroute_probe_*.csv) trae
+    // una columna de "hop" (varias filas por ciclo); el de eventos
+    // (--ground-truth-output) trae "categoria" y una fila por evento.
+    if (guessColumn(headers, "hop")) return "raw";
+    if (guessColumn(headers, "cat")) return "events";
+    if (guessColumn(headers, "ts") && guessColumn(headers, "rtt")) return "raw";
+    return "unknown";
+  }
+
+  function parseTsMs(s) {
+    if (!s) return null;
+    // admite "2026-04-02 15:08:11" (espacio en vez de T) ademas de ISO
+    var t = Date.parse(s.indexOf("T") === -1 ? s.replace(" ", "T") : s);
+    return isNaN(t) ? null : t;
+  }
+
+  function normalizeRecords(records, map) {
+    return records.map(function (r, i) {
+      var catRaw = map.cat ? r[map.cat] : "";
+      var tsRaw = map.ts ? r[map.ts] : "";
+      return {
+        // Si no hay columna de ciclo explícita, se usa el orden de fila
+        // como índice — el eje del gráfico igual usa el timestamp real
+        // (tsMs) cuando está disponible, así que esto solo importa para
+        // ordenar la tabla por defecto.
+        cycle: map.cycle && r[map.cycle] !== "" ? Number(r[map.cycle]) : i + 1,
+        ts: tsRaw,
+        tsMs: parseTsMs(tsRaw),
+        catKey: classifyLabel(catRaw),
+        catRaw: catRaw,
+        rtt: map.rtt && r[map.rtt] !== "" ? Number(r[map.rtt]) : null,
+        dst: map.dst ? r[map.dst] : "",
+        note: map.note ? r[map.note] : ""
+      };
+    }).filter(function (r) { return !isNaN(r.cycle); });
+  }
+
+  // -------------------------------------------------------------------
+  // Carga de datos
+  // -------------------------------------------------------------------
+  function loadSample() {
+    var sample = buildSampleData();
+    var cycles = sample.cycles.map(function (c) {
+      return { cycle: c.cycle_number, ts: c.timestamp, tsMs: parseTsMs(c.timestamp), rtt: Number(c.rtt_ms), dst: c.dst_addr, asn: "" };
+    });
+    var events = sample.events.map(function (r) {
+      return {
+        cycle: r.cycle_number, ts: r.timestamp, tsMs: parseTsMs(r.timestamp), catKey: classifyLabel(r.categoria),
+        catRaw: r.categoria, rtt: Number(r.rtt_ms), dst: r.dst_addr, note: r.nota
+      };
+    });
+    state.rawCycles = [];
+    state.eventsRaw = [];
+    state.rawFilename = null;
+    state.eventsFilename = null;
+    state.cycleRecs = cycles;
+    state.records = events;
+    state.isEventOnly = false;
+    state.meta = {
+      measurementId: "86710104",
+      probeId: "35268",
+      target: "8.8.8.8",
+      rangeStart: cycles.length ? cycles[0].tsMs : null,
+      rangeEnd: cycles.length ? cycles[cycles.length - 1].tsMs : null
+    };
+    state.metaIsSample = true;
+    state.metaUserEdited = { measurementId: false, probeId: false, target: false };
+    state.filterFrom = null;
+    state.filterTo = null;
+    setStatus(false, "Mostrando datos de ejemplo", "");
+    hideMapper();
+    hideNotice();
+    renderMeta();
+    renderRangeControls();
+    render();
+  }
+
+  // Lee el archivo y lo despacha según su tipo: "raw" (mediciones crudas,
+  // historial_traceroute_probe_*.csv) o "events" (--ground-truth-output).
+  // forcedKind fuerza la interpretación (botones dedicados); null = autodetectar
+  // por las columnas (usado al arrastrar un archivo al dropzone).
+  function handleFile(file, forcedKind) {
+    var reader = new FileReader();
+    reader.onload = function () {
+      var parsed = parseCSV(reader.result);
+      if (!parsed.records.length) {
+        showNotice('No se pudieron leer filas de "' + (file.name || 'el archivo') + '". Verificá que sea un CSV de texto plano con encabezado y datos.');
+        return;
+      }
+      var kind = forcedKind || detectFileKind(parsed.headers);
+      if (kind === "raw") loadRawCSV(parsed, file.name);
+      else loadEventsCSV(parsed, file.name); // "events" o "unknown" → el mapeo manual cubre lo desconocido
+    };
+    reader.readAsText(file);
+  }
+
+  // Al cargar el primer archivo real después de estar en modo ejemplo, se
+  // limpian los campos que el usuario no haya tocado a mano — si no, el
+  // "35268"/"8.8.8.8" del ejemplo queda pisando el valor real, porque el
+  // autocompletado solo evita sobrescribir un campo ya completado.
+  function clearSampleMetaIfNeeded() {
+    if (!state.metaIsSample) return;
+    state.metaIsSample = false;
+    if (!state.metaUserEdited.measurementId) state.meta.measurementId = "";
+    if (!state.metaUserEdited.probeId) state.meta.probeId = "";
+    if (!state.metaUserEdited.target) state.meta.target = "";
+  }
+
+  function maybeSetProbeIdFromFilename(filename) {
+    if (state.metaUserEdited.probeId) return; // no pisar lo que el usuario ya escribió a mano
+    var m = /probe[_-]?(\d+)/i.exec(filename || "");
+    if (m) state.meta.probeId = m[1];
+  }
+
+  function maybeSetMeasurementIdFromFilename(filename) {
+    if (state.metaUserEdited.measurementId) return; // no pisar lo que el usuario ya escribió a mano
+    var m = /measurement[_-]?(\d+)/i.exec(filename || "");
+    if (m) state.meta.measurementId = m[1];
+  }
+
+  function modeOf(values) {
+    // Valor más frecuente de una lista (ignora vacíos) — usado para
+    // inferir el target a partir del último hop alcanzado en cada ciclo.
+    var counts = {}, best = null, bestN = 0;
+    values.forEach(function (v) {
+      if (!v) return;
+      counts[v] = (counts[v] || 0) + 1;
+      if (counts[v] > bestN) { bestN = counts[v]; best = v; }
+    });
+    return best;
+  }
+
+  // ---- Archivo de mediciones crudas: timestamp, hop, ip, asn, rtt_ms ----
+  // Agrupa por timestamp (un traceroute completo = varios hops = un ciclo)
+  // y se queda con el hop más profundo alcanzado como RTT representativo
+  // del ciclo, para poder graficar TODOS los ciclos (no solo los anómalos).
+  function loadRawCSV(parsed, filename) {
+    var headers = parsed.headers, records = parsed.records;
+    var map = {
+      ts: guessColumn(headers, "ts"),
+      hop: guessColumn(headers, "hop"),
+      rtt: guessColumn(headers, "rtt"),
+      ip: guessColumn(headers, "ip"),
+      asn: guessColumn(headers, "asn")
+    };
+
+    if (!map.ts || !map.rtt) {
+      showNotice('No pude identificar las columnas de timestamp y/o RTT en "' + (filename || 'el archivo') +
+        '". Se espera un formato tipo timestamp, hop, ip, asn, rtt_ms (salida de extract_traceroute_history_v2.py sin --ground-truth-output).');
+      return;
+    }
+
+    var groups = {}, order = [];
+    records.forEach(function (r) {
+      var ts = r[map.ts];
+      if (!ts) return;
+      if (!groups[ts]) { groups[ts] = []; order.push(ts); }
+      groups[ts].push(r);
+    });
+
+    var cycles = order.map(function (ts) {
+      var rows = groups[ts];
+      var best = rows[rows.length - 1];
+      if (map.hop) {
+        var bestHop = -Infinity;
+        rows.forEach(function (r) {
+          var h = Number(r[map.hop]);
+          if (!isNaN(h) && h > bestHop) { bestHop = h; best = r; }
+        });
+      }
+      var rttVal = Number(best[map.rtt]);
+      return {
+        tsRaw: ts,
+        tsMs: parseTsMs(ts),
+        rtt: isNaN(rttVal) ? null : rttVal,
+        hopCount: map.hop ? (Number(best[map.hop]) || null) : null,
+        ip: map.ip ? best[map.ip] : "",
+        asn: map.asn ? best[map.asn] : ""
+      };
+    }).filter(function (c) { return c.tsMs != null; });
+    cycles.sort(function (a, b) { return a.tsMs - b.tsMs; });
+
+    state.rawCycles = cycles;
+    state.rawFilename = filename;
+    clearSampleMetaIfNeeded();
+    maybeSetProbeIdFromFilename(filename);
+    maybeSetMeasurementIdFromFilename(filename);
+    if (!state.metaUserEdited.target) {
+      var t = modeOf(cycles.map(function (c) { return c.ip; }));
+      if (t) state.meta.target = t;
+    }
+
+    state.lastLoadInfo = [];
+    if (!cycles.length) {
+      state.lastLoadInfo.push('El archivo "' + (filename || '') + '" no tiene timestamps interpretables — revisá el formato de fecha/hora.');
+    }
+
+    mergeAndRender();
+  }
+
+  // ---- Archivo de eventos (--ground-truth-output): típicamente timestamp,categoria ----
+  function loadEventsCSV(parsed, filename) {
+    state.csvHeaders = parsed.headers;
+    state.csvRecords = parsed.records;
+
+    var map = {
+      cycle: guessColumn(parsed.headers, "cycle"),
+      ts: guessColumn(parsed.headers, "ts"),
+      cat: guessColumn(parsed.headers, "cat"),
+      rtt: guessColumn(parsed.headers, "rtt"),
+      dst: guessColumn(parsed.headers, "dst"),
+      note: guessColumn(parsed.headers, "note")
+    };
+
+    // Solo la categoría es realmente obligatoria.
+    if (!map.cat) {
+      hideNotice();
+      showMapper(parsed.headers, map, filename);
+      return;
+    }
+    applyLoadedData(map, filename);
+  }
+
+  function applyLoadedData(map, filename) {
+    var recs = normalizeRecords(state.csvRecords, map);
+    state.eventsRaw = recs;
+    state.eventsFilename = filename;
+    clearSampleMetaIfNeeded();
+    maybeSetProbeIdFromFilename(filename);
+    maybeSetMeasurementIdFromFilename(filename);
+
+    var n = recs.length;
+    var uncatCount = recs.filter(function (r) {
+      return r.catRaw && classifyLabel(r.catRaw) === "none" && !/ninguno|none|sin evento|⚪/i.test(r.catRaw);
+    }).length;
+
+    var info = [];
+    if (n === 0) {
+      info.push('Ningún evento de "' + (filename || 'el archivo') + '" pudo convertirse — revisá el mapeo de columnas.');
+    } else if (uncatCount > 0) {
+      var sample = recs.filter(function (r) {
+        return r.catRaw && classifyLabel(r.catRaw) === "none" && !/ninguno|none|sin evento|⚪/i.test(r.catRaw);
+      }).slice(0, 3).map(function (r) { return '"' + r.catRaw + '"'; });
+      info.push(uncatCount + ' valores de categoría no reconocidos (se muestran como "sin evento"), ej.: ' + sample.join(', ') + '.');
+    }
+
+    state.lastLoadInfo = info;
+    hideMapper();
+    mergeAndRender();
+  }
+
+  // Combina mediciones crudas + eventos (cuando ambos están cargados) y
+  // decide qué se va a graficar. El emparejamiento es por timestamp más
+  // cercano dentro de una tolerancia, ya que el export de eventos suele
+  // usar timestamps redondeados/ligeramente distintos a los de cada hop.
+  function mergeAndRender() {
+    var notices = (state.lastLoadInfo || []).slice();
+
+    if (state.rawCycles.length) {
+      var cycles = state.rawCycles.map(function (c, i) {
+        return { cycle: i + 1, ts: c.tsRaw, tsMs: c.tsMs, rtt: c.rtt, dst: c.ip || "", asn: c.asn || "" };
+      });
+      state.cycleRecs = cycles;
+
+      // Cada evento se agrega como su PROPIA fila (nunca se pisan entre sí):
+      // un mismo ciclo puede tener varios cambios simultáneos (ej. una
+      // redirección que trae a la vez cambio de destino + de longitud +
+      // varios hops de ASN), y todos deben contarse y poder graficarse.
+      var eventRows = [];
+      if (state.eventsRaw.length) {
+        var TOL = 10 * 60 * 1000; // 10 min de tolerancia para emparejar
+        var unmatched = 0;
+        state.eventsRaw.forEach(function (ev) {
+          if (ev.tsMs == null) { unmatched++; return; }
+          var best = null, bestDiff = Infinity;
+          cycles.forEach(function (c) {
+            if (c.tsMs == null) return;
+            var diff = Math.abs(c.tsMs - ev.tsMs);
+            if (diff < bestDiff) { bestDiff = diff; best = c; }
+          });
+          if (best && bestDiff <= TOL) {
+            eventRows.push({ cycle: best.cycle, ts: best.ts, tsMs: best.tsMs, rtt: best.rtt, dst: best.dst, asn: best.asn, catKey: ev.catKey, catRaw: ev.catRaw, note: "" });
+          } else unmatched++;
+        });
+        if (unmatched > 0) {
+          notices.push(unmatched + ' de ' + state.eventsRaw.length + ' eventos no encontraron un ciclo cercano (±10 min) en las mediciones crudas — revisá que ambos archivos sean del mismo probe y cubran el mismo rango de fechas.');
+        }
+      }
+
+      state.records = eventRows;
+      state.isEventOnly = false;
+    } else if (state.eventsRaw.length) {
+      // Sin mediciones crudas, solo hay eventos: sin RTT ni ciclo real —
+      // es exactamente lo que exporta --ground-truth-output por sí solo.
+      state.cycleRecs = [];
+      state.records = state.eventsRaw.slice();
+      state.isEventOnly = true;
+    } else {
+      return;
+    }
+
+    var domainArr = state.cycleRecs.length ? state.cycleRecs : state.records;
+    var allTs = domainArr.map(function (r) { return r.tsMs; }).filter(function (v) { return v != null; });
+    if (allTs.length) {
+      state.meta.rangeStart = Math.min.apply(null, allTs);
+      state.meta.rangeEnd = Math.max.apply(null, allTs);
+    }
+    // Cada carga nueva resetea el recorte de fechas al rango completo —
+    // si el usuario ya había acotado la vista, cargar otro archivo la
+    // amplía de nuevo a todo el dataset (evita "perder" datos sin darse cuenta).
+    state.filterFrom = null;
+    state.filterTo = null;
+
+    var filesLoaded = [];
+    if (state.rawFilename) filesLoaded.push(state.rawFilename);
+    if (state.eventsFilename) filesLoaded.push(state.eventsFilename);
+    setStatus(true, "Datos cargados", filesLoaded.join("  +  "));
+
+    if (notices.length) showNotice(notices.join(" ")); else hideNotice();
+    renderMeta();
+    renderRangeControls();
+    render();
+  }
+
+  // -------------------------------------------------------------------
+  // Selector de rango de fechas (recorta gráfico + tabla, no los datos)
+  // -------------------------------------------------------------------
+  function toLocalInputValue(ms) {
+    var d = new Date(ms);
+    var pad = function (n) { return String(n).padStart(2, "0"); };
+    return d.getFullYear() + "-" + pad(d.getMonth() + 1) + "-" + pad(d.getDate()) + "T" + pad(d.getHours()) + ":" + pad(d.getMinutes());
+  }
+  function fromLocalInputValue(str) {
+    if (!str) return null;
+    var t = new Date(str).getTime();
+    return isNaN(t) ? null : t;
+  }
+
+  function renderRangeControls() {
+    var panel = document.getElementById("rangePanel");
+    var domainArr = state.cycleRecs.length ? state.cycleRecs : state.records;
+    var allTs = domainArr.map(function (r) { return r.tsMs; }).filter(function (v) { return v != null; });
+    if (allTs.length < 2) { panel.hidden = true; return; }
+    panel.hidden = false;
+    state.fullMin = Math.min.apply(null, allTs);
+    state.fullMax = Math.max.apply(null, allTs);
+    var fromInput = document.getElementById("rangeFrom");
+    var toInput = document.getElementById("rangeTo");
+    fromInput.min = toInput.min = toLocalInputValue(state.fullMin);
+    fromInput.max = toInput.max = toLocalInputValue(state.fullMax);
+    fromInput.value = toLocalInputValue(state.filterFrom != null ? state.filterFrom : state.fullMin);
+    toInput.value = toLocalInputValue(state.filterTo != null ? state.filterTo : state.fullMax);
+  }
+
+  function applyPreset(preset) {
+    if (preset === "all") {
+      state.filterFrom = null;
+      state.filterTo = null;
+    } else {
+      var hours = Number(preset);
+      var to = state.fullMax;
+      var from = to - hours * 3600 * 1000;
+      if (from < state.fullMin) from = state.fullMin;
+      state.filterFrom = from;
+      state.filterTo = to;
+    }
+    renderRangeControls();
+    render();
+  }
+
+  function byDateRange(arr) {
+    if (state.filterFrom == null && state.filterTo == null) return arr;
+    return arr.filter(function (r) {
+      if (r.tsMs == null) return true; // sin timestamp: no se puede filtrar, se mantiene
+      if (state.filterFrom != null && r.tsMs < state.filterFrom) return false;
+      if (state.filterTo != null && r.tsMs > state.filterTo) return false;
+      return true;
+    });
+  }
+  function scopedRecords() {
+    // Eventos dentro del rango de fechas seleccionado (uno por evento real).
+    return byDateRange(state.records);
+  }
+  function scopedCycles() {
+    // Ciclos base (línea de RTT completa) dentro del rango seleccionado.
+    return byDateRange(state.cycleRecs);
+  }
+
+  function renderRangeSummary() {
+    var el = document.getElementById("rangeSummary");
+    if (!el) return;
+    var totalRows = state.cycleRecs.length || state.records.length;
+    var scopedRows = state.cycleRecs.length ? scopedCycles().length : scopedRecords().length;
+    var filtered = state.filterFrom != null || state.filterTo != null;
+    el.textContent = filtered
+      ? "Mostrando " + scopedRows + " de " + totalRows + " ciclos del rango seleccionado"
+      : "Mostrando el rango completo (" + totalRows + " ciclos)";
+  }
+
+  function showNotice(text) {
+    var n = document.getElementById("loadNotice");
+    n.textContent = "⚠ " + text;
+    n.hidden = false;
+  }
+  function hideNotice() {
+    document.getElementById("loadNotice").hidden = true;
+  }
+
+  function showMapper(headers, guessMap, filename) {
+    var grid = document.getElementById("mapGrid");
+    grid.innerHTML = "";
+    var fields = [
+      ["cycle", "Ciclo / muestra (opcional — se genera solo si falta)"],
+      ["cat", "Categoría del evento (obligatorio)"],
+      ["ts", "Timestamp (opcional)"],
+      ["rtt", "RTT en ms (opcional)"],
+      ["dst", "Destino (opcional)"],
+      ["note", "Nota (opcional)"]
+    ];
+    fields.forEach(function (f) {
+      var key = f[0], labelText = f[1];
+      var wrap = document.createElement("div");
+      wrap.className = "map-field";
+      var label = document.createElement("label");
+      label.textContent = labelText;
+      var select = document.createElement("select");
+      select.dataset.field = key;
+      var noneOpt = document.createElement("option");
+      noneOpt.value = ""; noneOpt.textContent = "— no disponible —";
+      select.appendChild(noneOpt);
+      headers.forEach(function (h) {
+        var opt = document.createElement("option");
+        opt.value = h; opt.textContent = h;
+        if (guessMap[key] === h) opt.selected = true;
+        select.appendChild(opt);
+      });
+      wrap.appendChild(label); wrap.appendChild(select);
+      grid.appendChild(wrap);
+    });
+    state.pendingMap = { filename: filename };
+    document.getElementById("mapper").classList.add("show");
+  }
+  function hideMapper() { document.getElementById("mapper").classList.remove("show"); }
+
+  function setStatus(live, text, filename) {
+    document.getElementById("statusDot").classList.toggle("live", live);
+    document.getElementById("statusText").textContent = text;
+    document.getElementById("fileName").textContent = filename;
+  }
+
+  function renderMeta() {
+    document.getElementById("metaMeasurement").value = state.meta.measurementId || "";
+    document.getElementById("metaProbe").value = state.meta.probeId || "";
+    document.getElementById("metaTarget").value = state.meta.target || "";
+    var r = (state.meta.rangeStart != null && state.meta.rangeEnd != null)
+      ? fmtTick(state.meta.rangeStart) + "  →  " + fmtTick(state.meta.rangeEnd)
+      : "—";
+    document.getElementById("metaRange").textContent = r;
+  }
+
+  // -------------------------------------------------------------------
+  // Render: tarjetas de resumen
+  // -------------------------------------------------------------------
+  function render() {
+    renderRangeSummary();
+    renderStats();
+    renderLegend();
+    renderChart();
+    renderTable();
+  }
+
+  function visibleRecords() {
+    return scopedRecords().filter(function (r) { return state.activeCats[r.catKey]; });
+  }
+
+  function renderStats() {
+    var wrap = document.getElementById("statCards");
+    wrap.innerHTML = "";
+    var scoped = scopedRecords();
+    // 🔧 2026-10-02 — "loss" (📉 pérdida intermedia) se excluye de las
+    // métricas de "cambio" (Eventos detectados / Ciclos con cambios / Tasa
+    // de cambios), igual que ahora hace extract_traceroute_v2.py (FIX #13):
+    // sigue siendo observable -- se grafica, se lista en la tabla y tiene
+    // su propia tarjeta más abajo -- pero deja de contar como "change" acá
+    // también, para no divergir del criterio de Path Analysis.
+    var events = scoped.filter(function (r) { return r.catKey !== "none" && r.catKey !== "loss"; });
+
+    if (state.isEventOnly) {
+      // Sin columna de ciclo, no hay forma honesta de saber cuántos
+      // ciclos totales se monitorearon ni qué % tuvo anomalía — el CSV
+      // solo lista eventos. Mostrar esas dos cifras sería inventar un
+      // denominador que el archivo no trae.
+      addStat(wrap, String(events.length), "Eventos en el rango", null);
+      var withTs = scoped.filter(function (r) { return r.tsMs != null; }).map(function (r) { return r.tsMs; });
+      if (withTs.length > 1) {
+        var spanMs = Math.max.apply(null, withTs) - Math.min.apply(null, withTs);
+        addStat(wrap, fmtSpan(spanMs), "Período mostrado", null);
+      }
+    } else {
+      var totalCycles = scopedCycles().length;
+      // Un mismo ciclo puede tener varios eventos a la vez (ej. una
+      // redirección con cambio de destino + de longitud + varios hops de
+      // ASN simultáneos) — "eventos detectados" cuenta cada uno (coincide
+      // con las "líneas totales" del script por línea de comandos, que
+      // tampoco incluyen pérdida intermedia ahí), mientras que "ciclos con
+      // cambios"/"tasa de cambios" cuentan ciclos únicos (comparable 1:1
+      // contra "Ciclos con cambios" del script y, por lo tanto, contra
+      // Path Analysis).
+      var cyclesWithChange = {};
+      events.forEach(function (r) { cyclesWithChange[r.cycle] = true; });
+      var cyclesWithChangeCount = Object.keys(cyclesWithChange).length;
+      addStat(wrap, String(totalCycles), "Ciclos en el rango", null);
+      addStat(wrap, String(cyclesWithChangeCount), "Ciclos con cambios", null);
+      addStat(wrap, String(events.length), "Eventos detectados", null);
+      var pct = totalCycles ? ((cyclesWithChangeCount / totalCycles) * 100).toFixed(1) + "%" : "—";
+      addStat(wrap, pct, "Tasa de cambios", null);
+    }
+
+    // Las tarjetas por categoría (incluida 📉 Pérdida intermedia) siguen
+    // mostrando su conteo real sin filtrar -- son observacionales y no
+    // alimentan "Ciclos con cambios"/"Tasa de cambios" de arriba.
+    CATS.filter(function (c) { return c.key !== "none"; }).forEach(function (c) {
+      var n = scoped.filter(function (r) { return r.catKey === c.key; }).length;
+      addStat(wrap, String(n), c.emoji + " " + c.label, c.color);
+    });
+  }
+  function fmtSpan(ms) {
+    var h = ms / 3600000;
+    if (h < 48) return h.toFixed(1) + "h";
+    return (h / 24).toFixed(1) + "d";
+  }
+  function addStat(wrap, n, label, color) {
+    var d = document.createElement("div");
+    d.className = "stat" + (color ? " cat" : "");
+    if (color) d.style.setProperty("--cat-color", color);
+    d.innerHTML = '<div class="n tabnum">' + n + '</div><div class="l">' + label + '</div>';
+    wrap.appendChild(d);
+  }
+
+  // -------------------------------------------------------------------
+  // Render: leyenda / filtro
+  // -------------------------------------------------------------------
+  function renderLegend() {
+    var wrap = document.getElementById("legend");
+    wrap.innerHTML = "";
+    var scoped = scopedRecords();
+    CATS.forEach(function (c) {
+      var n = scoped.filter(function (r) { return r.catKey === c.key; }).length;
+      var chip = document.createElement("div");
+      chip.className = "chip" + (state.activeCats[c.key] ? "" : " off");
+      chip.style.setProperty("--chip-color", resolveVar(c.color));
+      chip.innerHTML = '<span class="sw"></span>' + c.emoji + " " + c.label + ' <span class="n tabnum">' + n + "</span>";
+      chip.addEventListener("click", function () {
+        state.activeCats[c.key] = !state.activeCats[c.key];
+        render();
+      });
+      wrap.appendChild(chip);
+    });
+  }
+
+  // -------------------------------------------------------------------
+  // Render: gráfico SVG (línea RTT + marcadores de evento por categoría)
+  // -------------------------------------------------------------------
+  function fmtTick(ms) {
+    var d = new Date(ms);
+    var pad = function (n) { return String(n).padStart(2, "0"); };
+    return pad(d.getDate()) + "/" + pad(d.getMonth() + 1) + " " + pad(d.getHours()) + ":" + pad(d.getMinutes());
+  }
+
+  function renderChart() {
+    var svg = document.getElementById("chart");
+    var W = 1100, H = 320, PAD_L = 48, PAD_R = 16, PAD_T = 16, PAD_B = 34;
+    svg.innerHTML = "";
+    var cycles = scopedCycles().slice();  // línea base: TODOS los ciclos, sin categorizar
+    var events = scopedRecords().slice(); // marcadores: un punto por evento real (sin deduplicar por ciclo)
+    // Dominio del gráfico: si hay mediciones crudas, siempre son la referencia
+    // completa (aunque no haya eventos en el tramo); si no, se arma con los
+    // propios eventos (caso "solo eventos").
+    var domain = cycles.length ? cycles : events;
+    if (!domain.length) {
+      var msg = el("text", { x: 20, y: 40, "font-size": 13 });
+      msg.textContent = "No hay datos en el rango de fechas seleccionado.";
+      svg.appendChild(msg);
+      return;
+    }
+
+    // Eje X: timestamp real cuando la mayoría de las filas lo tiene
+    // (caso de un CSV solo-eventos, sin columna de ciclo propia); si no,
+    // se usa el índice de ciclo. Mezclar ambos por fila daría un eje sin
+    // sentido, así que la eleccion es global para todo el grafico.
+    var withTs = domain.filter(function (r) { return r.tsMs != null; });
+    var useTime = withTs.length >= domain.length * 0.8 && withTs.length > 1;
+    var xKey = useTime ? "tsMs" : "cycle";
+
+    domain = domain.slice().sort(function (a, b) { return a[xKey] - b[xKey]; });
+    var minX = domain[0][xKey], maxX = domain[domain.length - 1][xKey];
+    var rttSource = cycles.length ? cycles : events;
+    var rttVals = rttSource.filter(function (r) { return r.rtt != null && !isNaN(r.rtt); }).map(function (r) { return r.rtt; });
+    var hasRtt = rttVals.length > 0;
+    var maxRtt = hasRtt ? Math.max.apply(null, rttVals) * 1.15 : 1;
+    var minRtt = 0;
+
+    function x(v) { return PAD_L + (v - minX) / Math.max(1, (maxX - minX)) * (W - PAD_L - PAD_R); }
+    function y(v) { return H - PAD_B - (v - minRtt) / Math.max(1, (maxRtt - minRtt)) * (H - PAD_T - PAD_B); }
+
+    var ns = "http://www.w3.org/2000/svg";
+    function el(tag, attrs) {
+      var e = document.createElementNS(ns, tag);
+      for (var k in attrs) e.setAttribute(k, attrs[k]);
+      return e;
+    }
+
+    if (hasRtt) {
+      // grilla horizontal + etiquetas de eje Y (solo tiene sentido con RTT)
+      var ySteps = 4;
+      for (var i = 0; i <= ySteps; i++) {
+        var v = minRtt + (maxRtt - minRtt) * (i / ySteps);
+        var yy = y(v);
+        svg.appendChild(el("line", { class: "grid", x1: PAD_L, x2: W - PAD_R, y1: yy, y2: yy }));
+        var t = el("text", { x: PAD_L - 8, y: yy + 4, "text-anchor": "end", "font-size": 11 });
+        t.textContent = Math.round(v) + "ms";
+        svg.appendChild(t);
+      }
+    } else {
+      svg.appendChild(el("line", { class: "grid", x1: PAD_L, x2: W - PAD_R, y1: PAD_T, y2: PAD_T }));
+    }
+    // eje X: marcas de tiempo o de ciclo, según corresponda
+    var xSteps = 6;
+    for (var j = 0; j <= xSteps; j++) {
+      var cx = minX + (maxX - minX) * (j / xSteps);
+      var xx = x(cx);
+      var t2 = el("text", { x: xx, y: H - PAD_B + 18, "text-anchor": "middle", "font-size": 11 });
+      t2.textContent = useTime ? fmtTick(cx) : Math.round(cx);
+      svg.appendChild(t2);
+    }
+    svg.appendChild(el("line", { class: "axis", x1: PAD_L, x2: W - PAD_R, y1: H - PAD_B, y2: H - PAD_B }));
+
+    // línea de RTT: siempre desde TODOS los ciclos crudos (si existen), no
+    // solo desde los que tuvieron un evento — así se ve la línea base real.
+    if (hasRtt) {
+      var withRtt = rttSource.filter(function (r) { return r.rtt != null && !isNaN(r.rtt); }).sort(function (a, b) { return a[xKey] - b[xKey]; });
+      if (withRtt.length > 1) {
+        var d = withRtt.map(function (r, i) { return (i === 0 ? "M" : "L") + x(r[xKey]).toFixed(1) + "," + y(r.rtt).toFixed(1); }).join(" ");
+        svg.appendChild(el("path", { class: "rttline", d: d }));
+      }
+    }
+
+    // marcadores: un punto por CADA evento real (nunca deduplicados por
+    // ciclo). Cuando varias filas caen en (casi) el mismo pixel de X — ej.
+    // una ráfaga de cambios simultáneos con el mismo timestamp exacto —
+    // se apilan verticalmente en vez de superponerse, para que cada una
+    // siga siendo clickeable.
+    var tooltip = document.getElementById("tooltip");
+    var visible = events.filter(function (r) { return r.catKey !== "none" && state.activeCats[r.catKey]; })
+      .sort(function (a, b) { return a[xKey] - b[xKey]; });
+    var baseY = hasRtt ? null : (H - PAD_B - 10);
+    var lastPx = null, stack = 0;
+    var PX_TOL = 4, STACK_STEP = 9;
+    visible.forEach(function (r) {
+      var c = CAT_BY_KEY[r.catKey];
+      var px = x(r[xKey]);
+      if (lastPx !== null && Math.abs(px - lastPx) <= PX_TOL) stack++; else stack = 0;
+      lastPx = px;
+      var cy = hasRtt && r.rtt != null && !isNaN(r.rtt) ? y(r.rtt) : baseY;
+      cy = cy - stack * STACK_STEP;
+      var circle = el("circle", {
+        class: "point", cx: px.toFixed(1), cy: cy.toFixed(1), r: 4.5,
+        fill: resolveVar(c.color), stroke: "var(--surface)", "stroke-width": 1
+      });
+      circle.addEventListener("mousemove", function (ev) {
+        tooltip.innerHTML = c.emoji + " " + c.label +
+          (r.catRaw && r.catRaw.toLowerCase() !== c.key ? " (" + r.catRaw + ")" : "") +
+          "<br>" + (r.ts || "ciclo " + r.cycle) +
+          (r.rtt != null && !isNaN(r.rtt) ? " · " + r.rtt.toFixed(1) + "ms" : "") +
+          (r.dst ? "<br>" + r.dst : "");
+        tooltip.style.left = ev.clientX + "px";
+        tooltip.style.top = (ev.clientY - 10) + "px";
+        tooltip.classList.add("show");
+      });
+      circle.addEventListener("mouseleave", function () { tooltip.classList.remove("show"); });
+      svg.appendChild(circle);
+    });
+  }
+
+  // -------------------------------------------------------------------
+  // Render: tabla
+  // -------------------------------------------------------------------
+  var ALL_COLUMNS = [
+    { key: "cycle", label: "Ciclo", always: true },
+    { key: "ts", label: "Timestamp", test: function (r) { return !!r.ts; } },
+    { key: "catKey", label: "Categoría", always: true },
+    { key: "rtt", label: "RTT (ms)", test: function (r) { return r.rtt != null && !isNaN(r.rtt); } },
+    { key: "dst", label: "Destino / IP", test: function (r) { return !!r.dst; } },
+    { key: "asn", label: "ASN", test: function (r) { return !!r.asn; } },
+    { key: "note", label: "Nota", test: function (r) { return !!r.note; } }
+  ];
+
+  function activeColumns() {
+    // Oculta columnas que el CSV cargado no trae en ninguna fila (ej. un
+    // export de solo timestamp+categoria no tiene RTT ni destino), en vez
+    // de mostrarlas llenas de guiones.
+    return ALL_COLUMNS.filter(function (col) {
+      return col.always || state.records.some(col.test);
+    });
+  }
+
+  function renderTable() {
+    var thead = document.getElementById("thead");
+    thead.innerHTML = "";
+    var trh = document.createElement("tr");
+    var COLUMNS = activeColumns();
+    COLUMNS.forEach(function (col) {
+      var th = document.createElement("th");
+      var arrow = state.sort.key === col.key ? (state.sort.dir === 1 ? "▲" : "▼") : "";
+      th.innerHTML = col.label + ' <span class="arrow">' + arrow + "</span>";
+      th.addEventListener("click", function () {
+        if (state.sort.key === col.key) state.sort.dir *= -1;
+        else { state.sort.key = col.key; state.sort.dir = 1; }
+        renderTable();
+      });
+      trh.appendChild(th);
+    });
+    thead.appendChild(trh);
+
+    var q = state.query.trim().toLowerCase();
+    var rows = visibleRecords().filter(function (r) {
+      if (!q) return true;
+      return (r.catRaw + " " + r.dst + " " + r.note + " " + r.ts).toLowerCase().indexOf(q) !== -1;
+    });
+    rows.sort(function (a, b) {
+      var k = state.sort.key, dir = state.sort.dir;
+      var va = a[k], vb = b[k];
+      if (typeof va === "number" && typeof vb === "number") return (va - vb) * dir;
+      return String(va || "").localeCompare(String(vb || "")) * dir;
+    });
+
+    var tbody = document.getElementById("tbody");
+    tbody.innerHTML = "";
+    document.getElementById("emptyMsg").hidden = rows.length > 0;
+
+    var CELL = {
+      cycle: function (r) { return '<td class="tabnum mono">' + r.cycle + "</td>"; },
+      ts: function (r) { return '<td class="mono">' + (r.ts || "—") + "</td>"; },
+      catKey: function (r) {
+        var c = CAT_BY_KEY[r.catKey];
+        return '<td><span class="badge" style="--badge-color:' + resolveVar(c.color) + '">' +
+          '<span class="sw"></span>' + c.emoji + " " + c.label + "</span>" +
+          (r.catRaw && r.catRaw.toLowerCase() !== c.key ? ' <span class="mono" style="color:var(--fg-faint);font-size:11px;">' + r.catRaw + "</span>" : "") +
+          "</td>";
+      },
+      rtt: function (r) { return '<td class="tabnum">' + (r.rtt != null && !isNaN(r.rtt) ? r.rtt.toFixed(1) : "—") + "</td>"; },
+      dst: function (r) { return "<td>" + (r.dst || "—") + "</td>"; },
+      asn: function (r) { return '<td class="mono">' + (r.asn || "—") + "</td>"; },
+      note: function (r) { return "<td>" + (r.note || "—") + "</td>"; }
+    };
+
+    rows.forEach(function (r) {
+      var tr = document.createElement("tr");
+      tr.innerHTML = COLUMNS.map(function (col) { return CELL[col.key](r); }).join("");
+      tbody.appendChild(tr);
+    });
+  }
+
+  // -------------------------------------------------------------------
+  // Eventos de UI
+  // -------------------------------------------------------------------
+  document.getElementById("btnSample").addEventListener("click", loadSample);
+  document.getElementById("btnLoadRaw").addEventListener("click", function () {
+    document.getElementById("fileInputRaw").click();
+  });
+  document.getElementById("btnLoadEvents").addEventListener("click", function () {
+    document.getElementById("fileInputEvents").click();
+  });
+  document.getElementById("fileInputRaw").addEventListener("change", function (e) {
+    var file = e.target.files[0];
+    if (file) handleFile(file, "raw");
+    e.target.value = "";
+  });
+  document.getElementById("fileInputEvents").addEventListener("change", function (e) {
+    var file = e.target.files[0];
+    if (file) handleFile(file, "events");
+    e.target.value = "";
+  });
+  document.getElementById("metaMeasurement").addEventListener("input", function (e) {
+    state.meta.measurementId = e.target.value;
+    state.metaUserEdited.measurementId = true;
+  });
+  document.getElementById("metaProbe").addEventListener("input", function (e) {
+    state.meta.probeId = e.target.value;
+    state.metaUserEdited.probeId = true;
+  });
+  document.getElementById("metaTarget").addEventListener("input", function (e) {
+    state.meta.target = e.target.value;
+    state.metaUserEdited.target = true;
+  });
+  document.getElementById("rangeFrom").addEventListener("change", function (e) {
+    state.filterFrom = fromLocalInputValue(e.target.value);
+    render();
+  });
+  document.getElementById("rangeTo").addEventListener("change", function (e) {
+    state.filterTo = fromLocalInputValue(e.target.value);
+    render();
+  });
+  document.querySelectorAll("#rangePanel [data-preset]").forEach(function (btn) {
+    btn.addEventListener("click", function () { applyPreset(btn.dataset.preset); });
+  });
+  document.getElementById("search").addEventListener("input", function (e) {
+    state.query = e.target.value; renderTable();
+  });
+  document.getElementById("btnApplyMap").addEventListener("click", function () {
+    var selects = document.querySelectorAll("#mapGrid select");
+    var map = {};
+    selects.forEach(function (s) { map[s.dataset.field] = s.value || null; });
+    if (!map.cat) {
+      alert("La columna de Categoría es obligatoria para poder graficar.");
+      return;
+    }
+    applyLoadedData(map, state.pendingMap && state.pendingMap.filename);
+  });
+
+  var dz = document.getElementById("dropzone");
+  ["dragover", "dragenter"].forEach(function (evt) {
+    dz.addEventListener(evt, function (e) { e.preventDefault(); dz.classList.add("dragover"); });
+  });
+  ["dragleave", "drop"].forEach(function (evt) {
+    dz.addEventListener(evt, function (e) { e.preventDefault(); dz.classList.remove("dragover"); });
+  });
+  dz.addEventListener("drop", function (e) {
+    var file = e.dataTransfer.files[0];
+    if (file) handleFile(file, null); // null = autodetectar por columnas
+  });
+
+  // Estado inicial: datos de ejemplo
+  loadSample();
+})();
+</script>
