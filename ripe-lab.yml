@@ -16,5 +16,10 @@ topology:
        - python3 -m pip config set global.break-system-packages true
        - chmod +x /root/dependencies.sh
        - bash /root/dependencies.sh    
-      
+     
+    bnpy:   
+      kind: linux
+      image: esanchezv/bnpy:latest  
+      binds:
+       - csvs:/root/csvs
  
