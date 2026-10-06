@@ -23,7 +23,7 @@ IMPORTANTE -- estado de validacion de este script:
     igual que veniamos haciendo con extract_traceroute_v2.py.
 
 Que hace:
-  1. Lee el CSV crudo que ya genera extract_traceroute_v2.py
+  1. Lee el CSV crudo que ya genera extract_traceroute.py
      (columnas: timestamp, hop, ip, asn, rtt_ms).
   2. Para cada ciclo (timestamp), toma el RTT del hop de destino (el de
      numero de hop mas alto presente en ESE ciclo, o el que vos indiques
