@@ -21,8 +21,8 @@ OBJETIVO:
 
 USO:
     python hdphmm_ripe_atlas_bnpy.py \
-        --crudo historial_traceroute.csv \
-        --categorias eventos.csv \
+        --crudo historial_traceroute_measurement59176905_probe23108.csv \
+        --categorias eventos_measurement59176905_probe23108.csv \
         --output-dir resultados_hdphmm \
         --gap-minutes 90 --K 15 --nlap 100 --sF 10
 =============================================================================
@@ -32,6 +32,7 @@ import os
 import sys
 import argparse
 import csv
+import re
 import warnings
 from collections import defaultdict, OrderedDict
 from datetime import datetime
@@ -47,6 +48,29 @@ except ImportError:
 # CONFIGURACIÓN GLOBAL
 # ============================================================================
 TOLERANCIA_MINUTOS = 15  # Ventana temporal para correlacionar eventos
+
+
+# ============================================================================
+# UTILIDADES
+# ============================================================================
+def extraer_ids_de_archivo(filename):
+    """
+    Extrae measurement_id y probe_id del nombre del archivo.
+    
+    Formato esperado: historial_traceroute_measurement{ID}_probe{ID}.csv
+    o: eventos_measurement{ID}_probe{ID}.csv
+    
+    Returns:
+        tuple: (measurement_id, probe_id) o (None, None) si no se encuentran
+    """
+    basename = os.path.basename(filename)
+    
+    # Buscar patrón measurement{digits}_probe{digits}
+    match = re.search(r'measurement(\d+)_probe(\d+)', basename)
+    if match:
+        return match.group(1), match.group(2)
+    
+    return None, None
 
 
 # ============================================================================
@@ -448,17 +472,25 @@ def analizar_residuos(resultados_correlacion, serie_completa):
 # ============================================================================
 def exportar_resultados(serie_completa, secuencias, estados_por_secuencia,
                         estados_suaves_por_secuencia, change_points,
-                        resultados_correlacion, residuos, output_dir):
+                        resultados_correlacion, residuos, output_dir,
+                        measurement_id, probe_id):
     """
-    Exporta todos los resultados a archivos CSV.
+    Exporta todos los resultados a archivos CSV con nombres que incluyen
+    measurement_id y probe_id para evitar sobrescritura.
     """
     print("[FASE 8] Exportando resultados a: {}".format(output_dir))
     
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
     
+    # Construir sufijo de IDs
+    if measurement_id and probe_id:
+        ids_suffix = "_measurement{}_probe{}".format(measurement_id, probe_id)
+    else:
+        ids_suffix = ""
+    
     # 1. Estados por ciclo (completo)
-    path_estados = os.path.join(output_dir, 'estados_hdphmm.csv')
+    path_estados = os.path.join(output_dir, 'estados_hdphmm{}.csv'.format(ids_suffix))
     with open(path_estados, 'w') as f:
         writer = csv.writer(f)
         writer.writerow(['timestamp', 'rtt_ms', 'seq_id', 'state_raw', 'state'])
@@ -470,7 +502,7 @@ def exportar_resultados(serie_completa, secuencias, estados_por_secuencia,
     print("  - Estados: {}".format(path_estados))
     
     # 2. Change-points con correlación
-    path_cp = os.path.join(output_dir, 'change_points_correlacion.csv')
+    path_cp = os.path.join(output_dir, 'change_points_correlacion{}.csv'.format(ids_suffix))
     with open(path_cp, 'w') as f:
         writer = csv.writer(f)
         writer.writerow(['timestamp', 'estado_anterior', 'estado_nuevo',
@@ -483,7 +515,7 @@ def exportar_resultados(serie_completa, secuencias, estados_por_secuencia,
     print("  - Correlación: {}".format(path_cp))
     
     # 3. Residuos (contribución original)
-    path_res = os.path.join(output_dir, 'residuos_contribucion_original.csv')
+    path_res = os.path.join(output_dir, 'residuos_contribucion_original{}.csv'.format(ids_suffix))
     with open(path_res, 'w') as f:
         writer = csv.writer(f)
         writer.writerow(['timestamp', 'estado_anterior', 'estado_nuevo',
@@ -497,7 +529,7 @@ def exportar_resultados(serie_completa, secuencias, estados_por_secuencia,
     print("  - Residuos: {}".format(path_res))
     
     # 4. Eventos de cambio de segmento (formato compatible con Path Analysis)
-    path_eventos = os.path.join(output_dir, 'segmentos_hdphmm.csv')
+    path_eventos = os.path.join(output_dir, 'segmentos_hdphmm{}.csv'.format(ids_suffix))
     with open(path_eventos, 'w') as f:
         writer = csv.writer(f)
         writer.writerow(['timestamp', 'categoria', 'estado_anterior', 'estado_nuevo'])
@@ -507,11 +539,15 @@ def exportar_resultados(serie_completa, secuencias, estados_por_secuencia,
     print("  - Eventos de segmento: {}".format(path_eventos))
     
     # 5. Resumen estadístico
-    path_resumen = os.path.join(output_dir, 'resumen_ejecucion.txt')
+    path_resumen = os.path.join(output_dir, 'resumen_ejecucion{}.txt'.format(ids_suffix))
     with open(path_resumen, 'w') as f:
         f.write("=" * 70 + "\n")
         f.write("RESUMEN DE EJECUCIÓN HDP-HMM\n")
         f.write("=" * 70 + "\n\n")
+        if measurement_id and probe_id:
+            f.write("Measurement ID: {}\n".format(measurement_id))
+            f.write("Probe ID: {}\n".format(probe_id))
+            f.write("\n")
         f.write("Fecha: {}\n".format(datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
         f.write("Dataset: {} puntos temporales\n".format(len(serie_completa)))
         f.write("Rango temporal: {} a {}\n".format(serie_completa[0][0], serie_completa[-1][0]))
@@ -564,6 +600,16 @@ def main():
     print("=" * 70)
     print("Python: {}".format(sys.version))
     print("NumPy: {}".format(np.__version__))
+    print("=" * 70)
+    
+    # Extraer measurement_id y probe_id del archivo de entrada
+    measurement_id, probe_id = extraer_ids_de_archivo(args.crudo)
+    if measurement_id and probe_id:
+        print("Measurement ID: {}".format(measurement_id))
+        print("Probe ID: {}".format(probe_id))
+    else:
+        print("[ADVERTENCIA] No se pudo extraer measurement_id/probe_id del nombre del archivo.")
+        print("  Los archivos de salida no tendrán sufijo de IDs.")
     print("=" * 70)
     
     # FASE 1: Carga de datos
@@ -632,7 +678,8 @@ def main():
     # FASE 8: Exportación
     exportar_resultados(serie, secuencias, estados_por_secuencia,
                        estados_suaves_por_secuencia, change_points,
-                       resultados_correlacion, residuos, args.output_dir)
+                       resultados_correlacion, residuos, args.output_dir,
+                       measurement_id, probe_id)
     
     print("\n" + "=" * 70)
     print("EJECUCIÓN COMPLETADA EXITOSAMENTE")
