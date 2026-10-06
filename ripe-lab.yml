@@ -19,7 +19,7 @@ topology:
      
     bnpy:   
       kind: linux
-      image: esanchezv/bnpy:latest  
+      image: docker.io/esanchezv/bnpy:latest  
       binds:
        - scripts:/root/scripts
  
