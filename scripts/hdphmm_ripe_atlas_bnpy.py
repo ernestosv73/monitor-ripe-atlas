@@ -2,7 +2,8 @@
 """
 =============================================================================
 HDP-HMM con bnpy para Segmentación de Latencia en RIPE Atlas
-+ Correlación con Path Analysis y Análisis de Residuos
++ Correlación con Path Analysis, Análisis de Residuos,
+  Fusión de Macro-Estados y Detección de Cambios de Longitud del Path
 =============================================================================
 Basado en: Mouchet et al., "Large-Scale Characterization and Segmentation of
            Internet Path Delays with Infinite HMMs" (arXiv:1910.12714)
@@ -11,20 +12,23 @@ Entorno: Python 2.7 + bnpy (build 8019474-py27_1) + numpy 1.16.6 + scipy 1.2.1
 
 OBJETIVO:
     1. Extraer serie temporal end-to-end de RTT desde CSV crudo de traceroute
-    2. Segmentar en secuencias independientes por huecos temporales
-    3. Entrenar HDP-HMM con bnpy para inferir estados latentes
-    4. Suavizar estados para eliminar chattering
-    5. Detectar change-points (transiciones entre estados)
-    6. Correlacionar con categorías del Path Analysis de RIPE Atlas
-    7. Identificar residuos (cambios detectados por HDP-HMM no explicados
+    2. Detectar cambios en la longitud del path (número de hops)
+    3. Segmentar en secuencias independientes por huecos temporales
+    4. Entrenar HDP-HMM con bnpy para inferir estados latentes
+    5. Opcionalmente fusionar estados en macro-estados (post-hoc)
+    6. Suavizar estados para eliminar chattering
+    7. Detectar change-points (transiciones entre estados)
+    8. Correlacionar con categorías del Path Analysis de RIPE Atlas
+    9. Identificar residuos (cambios detectados por HDP-HMM no explicados
        por el Path Analysis) -> contribución original
 
 USO:
     python hdphmm_ripe_atlas_bnpy.py \
-        --crudo historial_traceroute_measurement59176905_probe23108.csv \
-        --categorias eventos_measurement59176905_probe23108.csv \
+        --crudo historial_traceroute_measurement126502326_probe64883.csv \
+        --categorias eventos_measurement126502326_probe64883.csv \
         --output-dir resultados_hdphmm \
-        --gap-minutes 90 --K 15 --nlap 100 --sF 10
+        --gap-minutes 90 --K 15 --nlap 100 --sF 10 \
+        --macro-estados --min-dwell 3
 =============================================================================
 """
 from __future__ import print_function, division
@@ -48,6 +52,27 @@ except ImportError:
 # CONFIGURACIÓN GLOBAL
 # ============================================================================
 TOLERANCIA_MINUTOS = 15  # Ventana temporal para correlacionar eventos
+
+# Mapeo por defecto de estados a macro-estados
+# Basado en la observación empírica de que:
+#   - Estados 10, 13, 14 -> Macro 0 (Régimen Base Óptimo, ~33ms)
+#   - Estados 0, 1       -> Macro 1 (Degradación Leve, ~34-35ms)
+#   - Estado 2           -> Macro 2 (Congestión/Anomalía, ~45ms)
+#   - Estado 5           -> Macro 3 (Outlier extremo, ~61ms)
+# Los estados no listados se mantienen con su número original.
+MAPA_MACRO_ESTADOS_DEFAULT = {
+    10: 0, 13: 0, 14: 0,  # Macro 0: Base Óptimo
+    0: 1, 1: 1,            # Macro 1: Degradación Leve
+    2: 2,                  # Macro 2: Congestión
+    5: 3,                  # Macro 3: Outlier
+}
+
+DESCRIPCION_MACRO_ESTADOS = {
+    0: "Base Optimo",
+    1: "Degradacion Leve",
+    2: "Congestion",
+    3: "Outlier",
+}
 
 
 # ============================================================================
@@ -73,13 +98,43 @@ def extraer_ids_de_archivo(filename):
     return None, None
 
 
+def cargar_mapa_macro_estados(ruta_archivo):
+    """
+    Carga un mapa de macro-estados desde un archivo CSV con formato:
+        estado_original,macro_estado
+    
+    Si el archivo no existe o está vacío, retorna el mapa por defecto.
+    """
+    if not ruta_archivo or not os.path.exists(ruta_archivo):
+        return dict(MAPA_MACRO_ESTADOS_DEFAULT)
+    
+    mapa = {}
+    with open(ruta_archivo, 'r') as f:
+        reader = csv.reader(f)
+        for row in reader:
+            if len(row) >= 2:
+                try:
+                    orig = int(row[0].strip())
+                    macro = int(row[1].strip())
+                    mapa[orig] = macro
+                except ValueError:
+                    continue
+    return mapa
+
+
 # ============================================================================
 # FASE 1: PREPROCESAMIENTO DE DATOS
 # ============================================================================
 def cargar_csv_crudo(input_path, dest_hop=None):
     """
     Lee el CSV crudo y extrae el RTT del hop de destino por ciclo.
-    Devuelve lista de (timestamp_str, rtt_ms) ordenada por tiempo.
+    Detecta cambios en la longitud del path (número de hops).
+    
+    Returns:
+        tuple: (serie, longitudes, cambios_longitud)
+            - serie: lista de (timestamp_str, rtt_ms)
+            - longitudes: lista de (timestamp_str, longitud_path)
+            - cambios_longitud: lista de dicts con info de cambios
     """
     print("[FASE 1] Cargando CSV crudo: {}".format(input_path))
     
@@ -99,10 +154,29 @@ def cargar_csv_crudo(input_path, dest_hop=None):
             por_ciclo[ts][hop] = rtt
     
     serie = []
+    longitudes = []
+    cambios_longitud = []
+    longitud_anterior = None
+    
     for ts in sorted(por_ciclo.keys()):
         hops = por_ciclo[ts]
         if not hops:
             continue
+        
+        longitud_actual = max(hops.keys())
+        
+        # Detectar cambio de longitud del path
+        if longitud_anterior is not None and longitud_actual != longitud_anterior:
+            cambios_longitud.append({
+                'timestamp': ts,
+                'longitud_anterior': longitud_anterior,
+                'longitud_nueva': longitud_actual,
+                'diferencia': longitud_actual - longitud_anterior
+            })
+        
+        longitud_anterior = longitud_actual
+        longitudes.append((ts, longitud_actual))
+        
         if dest_hop is not None:
             if dest_hop in hops:
                 serie.append((ts, hops[dest_hop]))
@@ -113,7 +187,21 @@ def cargar_csv_crudo(input_path, dest_hop=None):
     print("  - Líneas procesadas: {}".format(n_lineas))
     print("  - Ciclos extraídos: {}".format(len(serie)))
     
-    return serie
+    # Resumen de longitudes
+    if longitudes:
+        long_vals = [l for (_, l) in longitudes]
+        long_unicas = sorted(set(long_vals))
+        long_counts = defaultdict(int)
+        for l in long_vals:
+            long_counts[l] += 1
+        print("  - Longitudes de path detectadas: {}".format(long_unicas))
+        for l in long_unicas:
+            print("      {} hops: {} ciclos ({:.1f}%)".format(
+                l, long_counts[l], 100.0 * long_counts[l] / len(longitudes)))
+    
+    print("  - Cambios de longitud detectados: {}".format(len(cambios_longitud)))
+    
+    return serie, longitudes, cambios_longitud
 
 
 def cargar_categorias(path_csv):
@@ -268,6 +356,42 @@ def correr_hdphmm(secuencias, K, nlap, transAlpha, startAlpha, hmmKappa, sF, see
 
 
 # ============================================================================
+# FASE 3b: FUSIÓN DE MACRO-ESTADOS (POST-HOC)
+# ============================================================================
+def fusionar_estados(estados_por_secuencia, mapa_macro):
+    """
+    Fusiona estados en macro-estados según el mapa proporcionado.
+    Los estados no listados en el mapa se mantienen con su número original.
+    """
+    if not mapa_macro:
+        return estados_por_secuencia
+    
+    print("\n[FASE 3b] Fusionando estados en macro-estados...")
+    print("  - Mapa de fusión: {}".format(mapa_macro))
+    
+    estados_fusionados = []
+    for secuencia in estados_por_secuencia:
+        estados_fusionados.append([mapa_macro.get(int(e), int(e)) for e in secuencia])
+    
+    # Estadísticas de macro-estados
+    todos_macro = [int(e) for arr in estados_fusionados for e in arr]
+    macro_unicos = sorted(set(todos_macro))
+    print("  - Macro-estados resultantes: {}".format(macro_unicos))
+    
+    todos_rtts = []
+    # Necesitamos reconstruir la lista plana de RTTs en el mismo orden
+    # (esto se hace en la función que llama, pero aquí mostramos distribución)
+    for macro in macro_unicos:
+        count = sum(1 for e in todos_macro if e == macro)
+        pct = 100.0 * count / len(todos_macro)
+        desc = DESCRIPCION_MACRO_ESTADOS.get(macro, "Sin descripcion")
+        print("      Macro-Estado {} ({}): {} puntos ({:.1f}%)".format(
+            macro, desc, count, pct))
+    
+    return estados_fusionados
+
+
+# ============================================================================
 # FASE 4: SUAVIZADO POST-HOC
 # ============================================================================
 def suavizar_estados(estados, min_dwell):
@@ -347,6 +471,37 @@ def detectar_change_points(secuencias, estados_por_secuencia):
     print("  - Change-points detectados: {}".format(len(change_points)))
     
     return change_points
+
+
+# ============================================================================
+# FASE 5b: INCORPORAR CAMBIOS DE LONGITUD COMO EVENTOS
+# ============================================================================
+def incorporar_cambios_longitud(cambios_longitud, dict_categorias):
+    """
+    Agrega los cambios de longitud del path al diccionario de categorías
+    como eventos adicionales con categoría 'cambio_longitud_detectado'.
+    Esto permite que la correlación los considere al buscar coincidencias.
+    """
+    if not cambios_longitud:
+        return dict_categorias
+    
+    print("[FASE 5b] Incorporando {} cambios de longitud como eventos...".format(
+        len(cambios_longitud)))
+    
+    # Copiar para no modificar el original
+    dict_extendido = defaultdict(lambda: {'categorias': set(), 'conteo': 0})
+    for ts, info in dict_categorias.items():
+        dict_extendido[ts] = {
+            'categorias': set(info['categorias']),
+            'conteo': info['conteo']
+        }
+    
+    for cambio in cambios_longitud:
+        ts = cambio['timestamp']
+        dict_extendido[ts]['categorias'].add('cambio_longitud_detectado')
+        dict_extendido[ts]['conteo'] += 1
+    
+    return dict(dict_extendido)
 
 
 # ============================================================================
@@ -473,7 +628,9 @@ def analizar_residuos(resultados_correlacion, serie_completa):
 def exportar_resultados(serie_completa, secuencias, estados_por_secuencia,
                         estados_suaves_por_secuencia, change_points,
                         resultados_correlacion, residuos, output_dir,
-                        measurement_id, probe_id):
+                        measurement_id, probe_id,
+                        longitudes=None, cambios_longitud=None,
+                        mapa_macro=None, usar_macro_estados=False):
     """
     Exporta todos los resultados a archivos CSV con nombres que incluyen
     measurement_id y probe_id para evitar sobrescritura.
@@ -489,8 +646,11 @@ def exportar_resultados(serie_completa, secuencias, estados_por_secuencia,
     else:
         ids_suffix = ""
     
+    # Sufijo adicional si se usaron macro-estados
+    macro_suffix = "_macro" if usar_macro_estados else ""
+    
     # 1. Estados por ciclo (completo)
-    path_estados = os.path.join(output_dir, 'estados_hdphmm{}.csv'.format(ids_suffix))
+    path_estados = os.path.join(output_dir, 'estados_hdphmm{}{}.csv'.format(ids_suffix, macro_suffix))
     with open(path_estados, 'w') as f:
         writer = csv.writer(f)
         writer.writerow(['timestamp', 'rtt_ms', 'seq_id', 'state_raw', 'state'])
@@ -501,8 +661,29 @@ def exportar_resultados(serie_completa, secuencias, estados_por_secuencia,
                 writer.writerow([ts, "{:.3f}".format(rtt), seq_id, int(e_crudo), int(e_suave)])
     print("  - Estados: {}".format(path_estados))
     
+    # 1b. Longitudes de path por ciclo (nuevo)
+    if longitudes:
+        path_long = os.path.join(output_dir, 'longitudes_path{}{}.csv'.format(ids_suffix, macro_suffix))
+        with open(path_long, 'w') as f:
+            writer = csv.writer(f)
+            writer.writerow(['timestamp', 'longitud_path'])
+            for ts, lon in longitudes:
+                writer.writerow([ts, lon])
+        print("  - Longitudes: {}".format(path_long))
+    
+    # 1c. Cambios de longitud detectados (nuevo)
+    if cambios_longitud:
+        path_cambios_long = os.path.join(output_dir, 'cambios_longitud{}{}.csv'.format(ids_suffix, macro_suffix))
+        with open(path_cambios_long, 'w') as f:
+            writer = csv.writer(f)
+            writer.writerow(['timestamp', 'longitud_anterior', 'longitud_nueva', 'diferencia'])
+            for c in cambios_longitud:
+                writer.writerow([c['timestamp'], c['longitud_anterior'],
+                               c['longitud_nueva'], c['diferencia']])
+        print("  - Cambios de longitud: {}".format(path_cambios_long))
+    
     # 2. Change-points con correlación
-    path_cp = os.path.join(output_dir, 'change_points_correlacion{}.csv'.format(ids_suffix))
+    path_cp = os.path.join(output_dir, 'change_points_correlacion{}{}.csv'.format(ids_suffix, macro_suffix))
     with open(path_cp, 'w') as f:
         writer = csv.writer(f)
         writer.writerow(['timestamp', 'estado_anterior', 'estado_nuevo',
@@ -515,7 +696,7 @@ def exportar_resultados(serie_completa, secuencias, estados_por_secuencia,
     print("  - Correlación: {}".format(path_cp))
     
     # 3. Residuos (contribución original)
-    path_res = os.path.join(output_dir, 'residuos_contribucion_original{}.csv'.format(ids_suffix))
+    path_res = os.path.join(output_dir, 'residuos_contribucion_original{}{}.csv'.format(ids_suffix, macro_suffix))
     with open(path_res, 'w') as f:
         writer = csv.writer(f)
         writer.writerow(['timestamp', 'estado_anterior', 'estado_nuevo',
@@ -529,7 +710,7 @@ def exportar_resultados(serie_completa, secuencias, estados_por_secuencia,
     print("  - Residuos: {}".format(path_res))
     
     # 4. Eventos de cambio de segmento (formato compatible con Path Analysis)
-    path_eventos = os.path.join(output_dir, 'segmentos_hdphmm{}.csv'.format(ids_suffix))
+    path_eventos = os.path.join(output_dir, 'segmentos_hdphmm{}{}.csv'.format(ids_suffix, macro_suffix))
     with open(path_eventos, 'w') as f:
         writer = csv.writer(f)
         writer.writerow(['timestamp', 'categoria', 'estado_anterior', 'estado_nuevo'])
@@ -539,7 +720,7 @@ def exportar_resultados(serie_completa, secuencias, estados_por_secuencia,
     print("  - Eventos de segmento: {}".format(path_eventos))
     
     # 5. Resumen estadístico
-    path_resumen = os.path.join(output_dir, 'resumen_ejecucion{}.txt'.format(ids_suffix))
+    path_resumen = os.path.join(output_dir, 'resumen_ejecucion{}{}.txt'.format(ids_suffix, macro_suffix))
     with open(path_resumen, 'w') as f:
         f.write("=" * 70 + "\n")
         f.write("RESUMEN DE EJECUCIÓN HDP-HMM\n")
@@ -551,12 +732,26 @@ def exportar_resultados(serie_completa, secuencias, estados_por_secuencia,
         f.write("Fecha: {}\n".format(datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
         f.write("Dataset: {} puntos temporales\n".format(len(serie_completa)))
         f.write("Rango temporal: {} a {}\n".format(serie_completa[0][0], serie_completa[-1][0]))
+        f.write("Macro-estados activados: {}\n".format(usar_macro_estados))
+        if usar_macro_estados and mapa_macro:
+            f.write("Mapa de fusión: {}\n".format(mapa_macro))
         f.write("\n--- ESTADÍSTICAS DE RTT ---\n")
         rtts = [rtt for _, rtt in serie_completa]
         f.write("Min: {:.2f} ms\n".format(min(rtts)))
         f.write("Max: {:.2f} ms\n".format(max(rtts)))
         f.write("Media: {:.2f} ms\n".format(np.mean(rtts)))
         f.write("Desv. Est.: {:.2f} ms\n".format(np.std(rtts)))
+        
+        # Estadísticas de longitud del path
+        if longitudes:
+            f.write("\n--- LONGITUD DEL PATH ---\n")
+            long_vals = [l for (_, l) in longitudes]
+            f.write("Longitudes detectadas: {}\n".format(sorted(set(long_vals))))
+            f.write("Longitud más frecuente: {}\n".format(
+                max(set(long_vals), key=long_vals.count)))
+            if cambios_longitud:
+                f.write("Cambios de longitud: {}\n".format(len(cambios_longitud)))
+        
         f.write("\n--- MODELO HDP-HMM ---\n")
         n_estados = len(set(int(e) for arr in estados_por_secuencia for e in arr))
         f.write("Estados activos: {}\n".format(n_estados))
@@ -593,6 +788,11 @@ def main():
     parser.add_argument('--seed', type=int, default=0, help='Semilla aleatoria')
     parser.add_argument('--bnpy-outdir', default='./bnpy-output', help='Carpeta bnpy')
     parser.add_argument('--alg-name', default='moVB', help='Algoritmo bnpy')
+    parser.add_argument('--macro-estados', action='store_true',
+                        help='Fusionar estados en macro-estados (post-hoc)')
+    parser.add_argument('--mapa-macro', type=str, default=None,
+                        help='Archivo CSV con mapa personalizado de macro-estados '
+                             '(formato: estado_original,macro_estado)')
     args = parser.parse_args()
     
     print("=" * 70)
@@ -612,8 +812,8 @@ def main():
         print("  Los archivos de salida no tendrán sufijo de IDs.")
     print("=" * 70)
     
-    # FASE 1: Carga de datos
-    serie = cargar_csv_crudo(args.crudo, dest_hop=args.dest_hop)
+    # FASE 1: Carga de datos (ahora retorna también longitudes y cambios)
+    serie, longitudes, cambios_longitud = cargar_csv_crudo(args.crudo, dest_hop=args.dest_hop)
     dict_categorias = cargar_categorias(args.categorias)
     
     if not serie:
@@ -651,15 +851,22 @@ def main():
         print("[ERROR] No se pudo entrenar el modelo.")
         sys.exit(1)
     
+    # FASE 3b: Fusión de macro-estados (opcional)
+    estados_trabajo = estados_por_secuencia
+    mapa_macro = None
+    if args.macro_estados:
+        mapa_macro = cargar_mapa_macro_estados(args.mapa_macro)
+        estados_trabajo = fusionar_estados(estados_por_secuencia, mapa_macro)
+    
     # FASE 4: Suavizado post-hoc
     print("\n[FASE 4] Suavizado post-hoc (--min-dwell {})...".format(args.min_dwell))
     n_cambios_crudos = sum(
-        1 for arr in estados_por_secuencia for i in range(1, len(arr)) if arr[i] != arr[i - 1]
+        1 for arr in estados_trabajo for i in range(1, len(arr)) if arr[i] != arr[i - 1]
     )
     print("  - Cambios sin suavizar: {}".format(n_cambios_crudos))
     
     estados_suaves_por_secuencia = [
-        suavizar_estados(arr, args.min_dwell) for arr in estados_por_secuencia
+        suavizar_estados(arr, args.min_dwell) for arr in estados_trabajo
     ]
     n_cambios_suaves = sum(
         1 for arr in estados_suaves_por_secuencia for i in range(1, len(arr)) if arr[i] != arr[i - 1]
@@ -669,17 +876,28 @@ def main():
     # FASE 5: Detección de change-points
     change_points = detectar_change_points(secuencias, estados_suaves_por_secuencia)
     
-    # FASE 6: Correlación con Path Analysis
-    resultados_correlacion = correlacionar_con_categorias(change_points, dict_categorias)
+    # FASE 5b: Incorporar cambios de longitud como eventos
+    dict_categorias_extendido = incorporar_cambios_longitud(
+        cambios_longitud, dict_categorias)
+    
+    # FASE 6: Correlación con Path Analysis (usando dict extendido)
+    resultados_correlacion = correlacionar_con_categorias(
+        change_points, dict_categorias_extendido)
     
     # FASE 7: Análisis de residuos
     residuos = analizar_residuos(resultados_correlacion, serie)
     
     # FASE 8: Exportación
-    exportar_resultados(serie, secuencias, estados_por_secuencia,
-                       estados_suaves_por_secuencia, change_points,
-                       resultados_correlacion, residuos, args.output_dir,
-                       measurement_id, probe_id)
+    exportar_resultados(
+        serie, secuencias, estados_por_secuencia,
+        estados_suaves_por_secuencia, change_points,
+        resultados_correlacion, residuos, args.output_dir,
+        measurement_id, probe_id,
+        longitudes=longitudes,
+        cambios_longitud=cambios_longitud,
+        mapa_macro=mapa_macro,
+        usar_macro_estados=args.macro_estados
+    )
     
     print("\n" + "=" * 70)
     print("EJECUCIÓN COMPLETADA EXITOSAMENTE")
