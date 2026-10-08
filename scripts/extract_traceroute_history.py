@@ -29,6 +29,7 @@ Correcciones acumuladas respecto a la versión original:
    'Ciclos con cambios'.
 """
 import argparse
+import os
 import sys
 from datetime import datetime, timezone
 from collections import Counter
@@ -134,7 +135,16 @@ def clasificar_anomalia(anom):
     return None  # ℹ️, ⚪ -- informativo, no cuenta
 
 
-def exportar_ground_truth(anomalies_per_cycle, perdida_log, output_path):
+def ruta_sin_perdida(output_path):
+    """
+    Nombre del tercer CSV (eventos sin pérdida intermedia): inserta
+    '_sin_perdida' antes de la extensión. Ej.: eventos_x.csv -> eventos_x_sin_perdida.csv
+    """
+    base, ext = os.path.splitext(output_path)
+    return f"{base}_sin_perdida{ext or '.csv'}"
+
+
+def exportar_ground_truth(anomalies_per_cycle, perdida_log, output_path, incluir_perdida=True):
     """
     Exporta los eventos clasificados a un CSV (columnas timestamp,categoria)
     -- una fila por cada anomalía INDIVIDUAL (no por ciclo), para poder
@@ -160,8 +170,9 @@ def exportar_ground_truth(anomalies_per_cycle, perdida_log, output_path):
             # se omite para no duplicarla -- 'perdida_log' es su única fuente.
             if categoria is not None and categoria != 'perdida_intermedia':
                 rows.append({'timestamp': item['timestamp'], 'categoria': categoria})
-    for item in perdida_log:
-        rows.append({'timestamp': item['timestamp'], 'categoria': 'perdida_intermedia'})
+    if incluir_perdida:
+        for item in perdida_log:
+            rows.append({'timestamp': item['timestamp'], 'categoria': 'perdida_intermedia'})
     df = pd.DataFrame(rows)
     if not df.empty:
         df = df.sort_values('timestamp').reset_index(drop=True)
@@ -484,6 +495,13 @@ def main():
             gt_output = f"eventos_measurement{args.measurement_id}_probe{args.probe_id}.csv"
         n_exportadas = exportar_ground_truth(anomalies_per_cycle, perdida_log, gt_output)
         print(f"💾 {n_exportadas} eventos de ground truth exportados a: {gt_output}")
+
+        # Tercer archivo: mismos eventos pero SIN 'perdida_intermedia' (para
+        # validar el HDP-HMM contra un ground truth solo de cambios).
+        gt_sin_perdida = ruta_sin_perdida(gt_output)
+        n_sin_perdida = exportar_ground_truth(anomalies_per_cycle, perdida_log, gt_sin_perdida,
+                                              incluir_perdida=False)
+        print(f"💾 {n_sin_perdida} eventos (sin pérdida intermedia) exportados a: {gt_sin_perdida}")
 
     # 5. Reporte
     print(f"\n📊 Resumen de Cambios Detectados:")
