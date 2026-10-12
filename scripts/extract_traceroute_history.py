@@ -37,6 +37,7 @@ Salidas:
     UN SOLO archivo, una fila por anomalia individual.
 """
 import argparse
+import ipaddress
 import sys
 from datetime import datetime, timezone
 from collections import Counter
@@ -231,6 +232,27 @@ def lineas_target(args, cycles_data, n_cambios_longitud):
     L += _lista_ips(ultimo, total, asn_de)
     L.append(f"   Ciclos cuyo último salto coincide con dst_addr (destino alcanzado): "
              f"{alcanzado} ({100*alcanzado/max(1, total):.1f}%)")
+    # Ciclos cuyo último salto NO es la IP modal del último salto (destino no alcanzado / falla de conectividad).
+    modal_ip, _ = ultimo.most_common(1)[0]
+    no_modal = [c for c in cycles_data if c['hops'][c['length']]['ip'] != modal_ip]
+    L.append(f"\n🚫 IP modal del último salto: {modal_ip}")
+    L.append(f"   Ciclos cuyo último salto NO es esa IP: {len(no_modal)} ({100*len(no_modal)/max(1, total):.2f}%)")
+    if no_modal:
+        L.append("   (timestamp UTC, longitud, ip, asn, rtt_ms)  [PRIVADA = IP RFC1918 del lado del probe: no se llegó al destino]")
+        maximo_nm = 50
+        for c in no_modal[:maximo_nm]:
+            h = c['hops'][c['length']]
+            try:
+                privada = ipaddress.ip_address(h['ip']).is_private
+            except ValueError:
+                privada = False
+            L.append(f"   {c['timestamp'].strftime('%Y-%m-%d %H:%M:%S')} {c['length']} {h['ip']} "
+                     f"{h['asn'] if h['asn'] is not None else 'Unknown'} {h['rtt']}"
+                     f"{'  [PRIVADA]' if privada else ''}")
+            L.append(f"      🔗 https://atlas.ripe.net/pathanalysis/embed?measurementId={args.measurement_id}"
+                     f"&sourceProbeId={args.probe_id}&center={c['ts_ms']}&window=7200000")
+        if len(no_modal) > maximo_nm:
+            L.append(f"   ... (+{len(no_modal) - maximo_nm} ciclos más)")
     L.append(f"\n📏 Longitud de la ruta al target (cantidad de saltos):")
     L.append(f"   Longitud típica: {tipica} saltos")
     L.append(f"   Ciclos con cambio de longitud respecto del ciclo anterior: {n_cambios_longitud} "
