@@ -877,9 +877,15 @@ def main():
         if asn_d is None:
             sys.stderr.write("No se pudo determinar el ASN del ultimo salto; use --destino-por ip.\n")
             sys.exit(1)
-        dest_ip = "ultimo salto de AS{0} (IP variable)".format(asn_d)
-        dest_desc = " (ASN modal del ultimo salto; cualquier IP del ASN)"
         serie, n_excl = serie_destino_asn(por_ciclo, asn_map, asn_d)
+        ips_ult = Counter(por_ciclo[ts_][hp_][0] for ts_, _, hp_ in serie)
+        if len(ips_ult) == 1:
+            dest_ip = "ultimo salto de AS{0} (IP fija {1})".format(asn_d, list(ips_ult)[0])
+        else:
+            ip_top, n_top = ips_ult.most_common(1)[0]
+            dest_ip = "ultimo salto de AS{0} ({1} IP distintas; la mas frecuente {2}: {3:.1f}%)".format(
+                asn_d, len(ips_ult), ip_top, 100.0 * n_top / max(len(serie), 1))
+        dest_desc = " (ASN modal del ultimo salto; se acepta cualquier IP del ASN)"
     if len(serie) < 2 * a.ventana_muestras:
         sys.stderr.write("Serie demasiado corta ({0} ciclos) para una ventana de {1}.\n".format(len(serie), a.ventana_muestras))
         sys.exit(1)
