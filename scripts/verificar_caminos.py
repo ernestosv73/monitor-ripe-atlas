@@ -226,11 +226,17 @@ def main():
     W("  Por longitud (tramos sostenidos): " + "; ".join(
         "{0} saltos: {1} tramos, {2} ciclos (mediana {3})".format(
             k, len(v), sum(v), sorted(v)[len(v) // 2]) for k, v in sorted(dur.items())))
-    W("  Tramos sostenidos (longitud, ciclos, inicio):")
-    for h, n, t in sost[:40]:
+    modal_run = longs.most_common(1)[0][0] if longs else None
+    no_mod = [r for r in sost if r[0] != modal_run]
+    W("  Tramos sostenidos de longitud distinta de la modal ({0} saltos): {1}".format(modal_run, len(no_mod)))
+    for h, n, t in no_mod:
         W("    {0:>2} saltos  {1:>6} ciclos  desde {2}".format(h, n, t))
-    if len(sost) > 40:
-        W("    ... ({0} tramos mas; ver el CSV)".format(len(sost) - 40))
+    mod = [r for r in sost if r[0] == modal_run]
+    W("  Tramos sostenidos de longitud modal: {0} (primeros 15; todos en el CSV)".format(len(mod)))
+    for h, n, t in mod[:15]:
+        W("    {0:>2} saltos  {1:>6} ciclos  desde {2}".format(h, n, t))
+    if len(mod) > 15:
+        W("    ... ({0} tramos mas)".format(len(mod) - 15))
 
     # ---- CRUCE
     W("")
@@ -372,6 +378,17 @@ def main():
         mayor = detalle.most_common(1)[0]
         W("  * Los cambio_ip_asn sin camino real son principalmente: '{0}' ({1} saltos).".format(mayor[0], mayor[1]))
 
+    if not os.path.isdir(a.output_dir):
+        os.makedirs(a.output_dir)
+    suf0 = "_measurement{0}_probe{1}".format(mid, pid) if mid else ""
+    csvp = os.path.join(a.output_dir, "tramos_longitud{0}.csv".format(suf0))
+    with open(csvp, "w", newline="") if sys.version_info[0] >= 3 else open(csvp, "wb") as fc:
+        wr = csv.writer(fc)
+        wr.writerow(["inicio", "longitud", "ciclos", "sostenido"])
+        for h, n, t in runs:
+            wr.writerow([t, h, n, int(n >= P)])
+    W("")
+    W("Tramos exportados a: {0}".format(csvp))
     texto = "\n".join(L) + "\n"
     print(texto)
     if not os.path.isdir(a.output_dir):
