@@ -46,17 +46,22 @@ def aspath(h):
 
 def leer_historial(path):
     ciclos = defaultdict(dict)
+    ips = defaultdict(dict)
     n = 0
     with open(path, "r") as f:
         for r in csv.DictReader(f):
             n += 1
-            if not (r.get("ip") or "").strip():
+            ip = (r.get("ip") or "").strip()
+            if not ip:
                 continue
             try:
-                ciclos[r["timestamp"].strip()][int(r["hop"])] = (r.get("asn") or "")
+                ts = r["timestamp"].strip()
+                hop = int(r["hop"])
             except (ValueError, TypeError, KeyError):
                 continue
-    return ciclos, n
+            ciclos[ts][hop] = (r.get("asn") or "")
+            ips[ts][hop] = ip
+    return ciclos, ips, n
 
 
 def leer_eventos(path):
@@ -82,6 +87,9 @@ def main():
     ap.add_argument("--eventos", default=None)
     ap.add_argument("--persistencia", type=int, default=4,
                     help="Ciclos minimos para que un tramo de misma longitud sea sostenido (default 4)")
+    ap.add_argument("--max-hops", type=int, default=None,
+                    help="Valor de --max-hops usado al extraer (default del extractor: 15); si la longitud maxima observada "
+                         "lo iguala, las rutas pueden estar truncadas")
     ap.add_argument("--output-dir", default=".")
     a = ap.parse_args()
 
@@ -98,7 +106,7 @@ def main():
         sys.stderr.write("[AVISO] no existe --eventos ({0}): se omiten las comprobaciones 1 y el cruce.\n".format(ev_path))
         ev_path = None
 
-    ciclos, n_lin = leer_historial(a.historial)
+    ciclos, ips, n_lin = leer_historial(a.historial)
     tss = sorted(ciclos)
     L = []
     W = L.append
@@ -117,6 +125,18 @@ def main():
     paths = Counter(f[1] for f in firma.values())
     W("Longitudes observadas (saltos: ciclos): " + ", ".join(
         "{0}: {1}".format(k, v) for k, v in sorted(longs.items(), key=lambda x: -x[1])[:8]))
+    if longs:
+        mx = max(longs)
+        modal_l = longs.most_common(1)[0][0]
+        trunc = False
+        if a.max_hops is not None and mx >= a.max_hops:
+            W("[AVISO] la longitud maxima observada ({0}) iguala --max-hops ({1}): las rutas mas largas pueden estar".format(mx, a.max_hops))
+            W("        truncadas. Re-extraer con un --max-hops mayor (p. ej. 30) antes de interpretar longitudes ni destino.")
+            trunc = True
+        elif modal_l == mx and mx >= 10 and longs[mx] > 0.5 * len(tss):
+            W("[AVISO] la longitud modal ({0}) es tambien la maxima observada: patron tipico de truncamiento por el limite".format(mx))
+            W("        de saltos del extractor (--max-hops, default 15). Pasar --max-hops con el valor usado o re-extraer con uno mayor.")
+            trunc = True
     W("AS-paths distintos (colapsados): {0}".format(len(paths)))
     for p, n in paths.most_common(5):
         W("  {0:>6} ciclos  {1}".format(n, " > ".join(p) if p else "(sin ASN)"))
@@ -243,6 +263,71 @@ def main():
     else:
         W("  (omitido: requiere archivo de eventos)")
 
+    # ---- DETALLE de los ciclos con cambio_ip_asn sin cambio de camino real
+    detalle = None
+    if cats is not None and cruce is not None and cruce["ip_sin_camino"]:
+        W("")
+        W("-" * 74)
+        W("DETALLE - Ciclos con cambio_ip_asn SIN cambio de camino real (comparacion posicional con el ciclo anterior)")
+        W("-" * 74)
+        idx = dict((t, i) for i, t in enumerate(tss))
+        tipos = Counter()
+        valores = Counter()
+        ej = []
+        sin_rep = 0
+        for t in sorted(x for x in A if x in idx and x not in clase):
+            i = idx[t]
+            if i == 0:
+                continue
+            pt = tss[i - 1]
+            dif = []
+            for k in sorted(set(ciclos[t]) & set(ciclos[pt])):
+                a0, a1 = ciclos[pt][k].strip(), ciclos[t][k].strip()
+                if a0 != a1:
+                    v0, v1 = asn_valido(a0), asn_valido(a1)
+                    tipo = ("ASN valido <-> sin ASN" if v0 != v1 else
+                            "frontera entre ASN desplazada" if v0 and v1 else "formato de ASN vacio distinto")
+                    dif.append((k, ips[pt][k], a0, ips[t][k], a1, tipo))
+            if not dif:
+                sin_rep += 1
+            for d in dif:
+                tipos[d[5]] += 1
+                valores[(d[2] or "(vacio)", d[4] or "(vacio)")] += 1
+            if dif and len(ej) < 8:
+                ej.append((t, dif[0]))
+        W("  Diferencias de ASN por salto en esos ciclos:")
+        for k, v in tipos.most_common():
+            W("    {0:<34}{1:>5}".format(k, v))
+        if sin_rep:
+            W("    {0:<34}{1:>5}   (el evento no se reproduce comparando con el ciclo anterior)".format(
+                "ciclos sin diferencia reproducible", sin_rep))
+        W("  Pares de ASN mas frecuentes (antes -> ahora):")
+        for (x, y), v in valores.most_common(5):
+            W("    {0:>5} x  {1} -> {2}".format(v, x, y))
+        if ej:
+            W("  Ejemplos (ciclo, salto, IP/ASN anterior -> IP/ASN actual):")
+            for t, d in ej:
+                W("    {0}  hop {1}: {2} [{3}] -> {4} [{5}]".format(
+                    t, d[0], d[1], d[2] or "(vacio)", d[3], d[4] or "(vacio)"))
+        detalle = tipos
+
+    # ---- DESTINO ALCANZADO en ciclos de longitud no modal
+    modal_len = longs.most_common(1)[0][0] if longs else None
+    destinos = Counter(ips[t][max(ips[t])] for t in tss if len(longs) and firma[t][0] == modal_len and ips[t])
+    dest_modal = destinos.most_common(1)[0][0] if destinos else None
+    no_modal = [t for t in tss if firma[t][0] != modal_len]
+    alc = [t for t in no_modal if ips[t] and ips[t][max(ips[t])] == dest_modal]
+    if no_modal:
+        W("")
+        W("-" * 74)
+        W("DESTINO ALCANZADO en los ciclos de longitud distinta de la modal ({0} saltos)".format(modal_len))
+        W("-" * 74)
+        W("  IP del ultimo salto en los ciclos modales: {0}".format(dest_modal))
+        W("  Ciclos de otra longitud: {0}; su ultimo salto es esa IP en {1} ({2})".format(
+            len(no_modal), len(alc), pct(len(alc), len(no_modal))))
+        W("  Si es alto: el camino realmente cambio de longitud. Si es bajo: el destino no respondio y el 'cambio de")
+        W("  longitud' es una respuesta perdida en el ultimo salto, no un cambio de ruta.")
+
     # ---- LECTURA
     W("")
     W("-" * 74)
@@ -254,7 +339,8 @@ def main():
         W("  * Camino estable: no hay cambios de AS-path ni de longitud en el periodo.")
     elif n_as == 0:
         W("  * NO hay cambios de AS-path: los {0} cambios de longitud ocurren dentro de los mismos AS (insercion/".format(n_lo))
-        W("    remocion de saltos en un AS, no cambio de proveedor ni de ruta BGP).")
+        W("    remocion de saltos en un AS, no cambio de proveedor ni de ruta BGP). Antes de interpretarlos como cambio de")
+        W("    ruta, ver la seccion DESTINO ALCANZADO: si el destino no respondio, la longitud menor es una respuesta perdida.")
     else:
         W("  * Hay {0} ciclos con cambio de AS-path (cambio de ruta a nivel de AS), {1} de solo longitud.".format(n_as, n_lo))
     if cruce is not None:
@@ -277,8 +363,14 @@ def main():
     W("  * De {0} transiciones de longitud, {1} tramos son transitorios (< {2} ciclos) y {3} sostenidos:".format(
         max(len(runs) - 1, 0), cor, P, len(sost)))
     W("    para contar cambios de camino conviene usar los tramos sostenidos, no los ciclos con evento.")
-    W("  * Cambios sostenidos entre tramos de distinta longitud: {0} (ver pelt_degradacion.py para su efecto en RTT).".format(
-        max(len(sost) - 1, 0)))
+    cambios_sost = sum(1 for i in range(1, len(sost)) if sost[i][0] != sost[i - 1][0])
+    W("  * Cambios sostenidos (tramo sostenido -> tramo sostenido de otra longitud): {0}.".format(cambios_sost))
+    if len(sost) > 1 and cambios_sost == 0:
+        W("    Los tramos sostenidos son todos de la misma longitud ({0} saltos): las caidas a otra longitud son".format(sost[0][0]))
+        W("    transitorias, asi que el camino es estable en el periodo.")
+    if detalle:
+        mayor = detalle.most_common(1)[0]
+        W("  * Los cambio_ip_asn sin camino real son principalmente: '{0}' ({1} saltos).".format(mayor[0], mayor[1]))
 
     texto = "\n".join(L) + "\n"
     print(texto)
