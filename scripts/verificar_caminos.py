@@ -238,6 +238,44 @@ def main():
     if len(mod) > 15:
         W("    ... ({0} tramos mas)".format(len(mod) - 15))
 
+    # ---- BLOQUES: tramos sostenidos de igual longitud separados solo por transitorios
+    from datetime import datetime
+    seq = []   # [longitud, idx_ini, idx_fin]
+    for i, ts in enumerate(tss):
+        lg = firma[ts][0]
+        if seq and seq[-1][0] == lg:
+            seq[-1][2] = i
+        else:
+            seq.append([lg, i, i])
+    sust_idx = [r for r in seq if r[2] - r[1] + 1 >= P]
+    bloques = []
+    for r in sust_idx:
+        if bloques and bloques[-1][0] == r[0]:
+            bloques[-1][2] = r[2]
+        else:
+            bloques.append(list(r))
+    dts = sorted((datetime.strptime(tss[i + 1], "%Y-%m-%d %H:%M:%S") -
+                  datetime.strptime(tss[i], "%Y-%m-%d %H:%M:%S")).total_seconds() for i in range(len(tss) - 1))
+    cad_s = dts[len(dts) // 2] if dts else 0.0
+    W("")
+    W("  BLOQUES (tramos sostenidos de igual longitud unidos cuando los separan solo tramos transitorios):")
+    W("    Cadencia mediana: {0:.0f} s. Bloques: {1}; cambios entre bloques: {2}".format(
+        cad_s, len(bloques), max(len(bloques) - 1, 0)))
+    W("    {0:>9} {1:>20} {2:>20} {3:>9} {4:>8} {5:>10}".format("longitud", "inicio", "fin", "dur(h)", "ciclos", "fuera"))
+    modal_b = longs.most_common(1)[0][0] if longs else None
+    mostrados = 0
+    for lg, i0, i1 in bloques:
+        if lg == modal_b and len(bloques) > 12:
+            continue
+        n = i1 - i0 + 1
+        fuera = sum(1 for i in range(i0, i1 + 1) if firma[tss[i]][0] != lg)
+        W("    {0:>6} sal {1:>20} {2:>20} {3:>9.1f} {4:>8} {5:>10}".format(
+            lg, tss[i0], tss[i1], n * cad_s / 3600.0, n, fuera))
+        mostrados += 1
+    if mostrados < len(bloques):
+        W("    (bloques de longitud modal omitidos: {0}; 'fuera' = ciclos del bloque con otra longitud)".format(len(bloques) - mostrados))
+    cambios_bloque = max(len(bloques) - 1, 0)
+
     # ---- CRUCE
     W("")
     W("-" * 74)
@@ -369,9 +407,9 @@ def main():
     W("  * De {0} transiciones de longitud, {1} tramos son transitorios (< {2} ciclos) y {3} sostenidos:".format(
         max(len(runs) - 1, 0), cor, P, len(sost)))
     W("    para contar cambios de camino conviene usar los tramos sostenidos, no los ciclos con evento.")
-    cambios_sost = sum(1 for i in range(1, len(sost)) if sost[i][0] != sost[i - 1][0])
-    W("  * Cambios sostenidos (tramo sostenido -> tramo sostenido de otra longitud): {0}.".format(cambios_sost))
-    if len(sost) > 1 and cambios_sost == 0:
+    cambios_sost = cambios_bloque
+    W("  * Cambios de camino sostenidos (entre bloques de distinta longitud): {0}.".format(cambios_sost))
+    if len(bloques) > 1 and len(set(b[0] for b in bloques)) == 1:
         W("    Los tramos sostenidos son todos de la misma longitud ({0} saltos): las caidas a otra longitud son".format(sost[0][0]))
         W("    transitorias, asi que el camino es estable en el periodo.")
     if detalle:
