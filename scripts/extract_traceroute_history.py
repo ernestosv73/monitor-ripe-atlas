@@ -213,6 +213,13 @@ def _lista_ips(contador, total, asn_de=None, maximo=10):
     return L
 
 
+def _es_privada(ip):
+    try:
+        return ipaddress.ip_address(ip).is_private
+    except ValueError:
+        return False
+
+
 def lineas_target(args, cycles_data, n_cambios_longitud):
     """Destino de la medición: IP(s) del target y distribución de ciclos por longitud de la ruta hacia él."""
     total = len(cycles_data)
@@ -233,19 +240,34 @@ def lineas_target(args, cycles_data, n_cambios_longitud):
     L.append(f"   Ciclos cuyo último salto coincide con dst_addr (destino alcanzado): "
              f"{alcanzado} ({100*alcanzado/max(1, total):.1f}%)")
     # Ciclos cuyo último salto NO es la IP modal del último salto (destino no alcanzado / falla de conectividad).
+    # Un ciclo "llegó al destino" si su último salto es alguna de las IP del target (dst_addr; un nombre de
+    # dominio puede resolver a varias IP) o, si hay ASN, pertenece al ASN modal del último salto.
     modal_ip, _ = ultimo.most_common(1)[0]
-    no_modal = [c for c in cycles_data if c['hops'][c['length']]['ip'] != modal_ip]
-    L.append(f"\n🚫 IP modal del último salto: {modal_ip}")
-    L.append(f"   Ciclos cuyo último salto NO es esa IP: {len(no_modal)} ({100*len(no_modal)/max(1, total):.2f}%)")
+    ips_destino = set(dst) | {modal_ip} if len(dst) <= 1 else set(dst)
+    asn_ult = Counter(c['hops'][c['length']]['asn'] for c in cycles_data
+                      if c['hops'][c['length']]['asn'] not in (None, 'Unknown', '', 'NA'))
+    asn_modal = asn_ult.most_common(1)[0][0] if asn_ult else None
+
+    def llego(c):
+        h = c['hops'][c['length']]
+        if h['ip'] in ips_destino:
+            return True
+        return asn_modal is not None and h['asn'] == asn_modal and not _es_privada(h['ip'])
+    no_modal = [c for c in cycles_data if not llego(c)]
+    L.append(f"\n🚫 Destino no alcanzado (último salto fuera del target):")
+    if len(dst) > 1:
+        L.append(f"   El target tiene {len(dst)} IP (nombre de dominio): se consideran todas válidas como destino.")
+    elif asn_modal is None:
+        L.append(f"   Referencia: IP modal del último salto {modal_ip}")
+    if asn_modal is not None:
+        L.append(f"   ASN modal del último salto: {asn_modal} (también se acepta cualquier IP pública de ese ASN)")
+    L.append(f"   Ciclos que no llegaron al destino: {len(no_modal)} ({100*len(no_modal)/max(1, total):.2f}%)")
     if no_modal:
         L.append("   (timestamp UTC, longitud, ip, asn, rtt_ms)  [PRIVADA = IP RFC1918 del lado del probe: no se llegó al destino]")
         maximo_nm = 50
         for c in no_modal[:maximo_nm]:
             h = c['hops'][c['length']]
-            try:
-                privada = ipaddress.ip_address(h['ip']).is_private
-            except ValueError:
-                privada = False
+            privada = _es_privada(h['ip'])
             L.append(f"   {c['timestamp'].strftime('%Y-%m-%d %H:%M:%S')} {c['length']} {h['ip']} "
                      f"{h['asn'] if h['asn'] is not None else 'Unknown'} {h['rtt']}"
                      f"{'  [PRIVADA]' if privada else ''}")
