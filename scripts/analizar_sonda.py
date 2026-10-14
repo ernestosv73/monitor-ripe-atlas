@@ -3,19 +3,20 @@
 """
 analizar_sonda.py - Flujo completo de analisis de una sonda RIPE Atlas en un solo comando.
 
-Pide (o recibe por linea de comandos) measurement ID, probe ID, start-time, stop-time y max-hops, y ejecuta en orden:
+Pide (o recibe por linea de comandos) measurement ID, probe ID, start-time, stop-time, max-hops, interval (solo para la ayuda) y persistencia, y ejecuta en orden:
 
   1. extractor:   python3 extract_traceroute_history.py --measurement-id M --probe-id P --start-time S --stop-time E \
                       --resolve-asn --max-hops N --ground-truth-output
   2. verificador: python3 verificar_caminos.py --historial historial_traceroute_measurementM_probeP.csv \
-                      --eventos eventos_measurementM_probeP.csv --output-dir verificacion_P --max-hops N
+                      --eventos eventos_measurementM_probeP.csv --output-dir verificacion_P --max-hops N \
+                      --persistencia K
   3. Path Analysis: python3 pathanalysis_url.py --measurement-id M --probe-id P --start-time S --stop-time E
 
 Uso interactivo (pregunta lo que falte):
     python3 analizar_sonda.py
 
 Uso directo (sin preguntas):
-    python3 analizar_sonda.py -m 126502326 -p 64883 --start-time "2026-03-01 12:00" --stop-time "2026-04-01 12:00" --max-hops 30
+    python3 analizar_sonda.py -m 126502326 -p 64883 --start-time "2026-03-01 12:00" --stop-time "2026-04-01 12:00" --max-hops 30 --interval 3600 --persistencia 4
 
 Los scripts se buscan en la misma carpeta que este archivo (o en la carpeta actual). Si el extractor no se llama
 extract_traceroute_history.py se usa el primero que exista de: extract_traceroute_v2_sin_redondeo.py,
@@ -33,6 +34,29 @@ from datetime import datetime
 
 EXTRACTORES = ("extract_traceroute_history.py", "extract_traceroute_v2_sin_redondeo.py", "extract_traceroute_v2.py")
 MAX_HOPS_SUGERIDO = 30   # el default del extractor (15) trunca rutas largas
+PERSISTENCIA_SUGERIDA = 4   # mismo default que verificar_caminos.py
+
+def fmt_duracion(segundos, en_horas):
+    """Duracion en horas (interval >= 3600 s) o en minutos (interval < 3600 s)."""
+    if en_horas:
+        return "{0:g} h".format(round(segundos / 3600.0, 2))
+    return "{0:g} min".format(round(segundos / 60.0, 2))
+
+
+def ayuda_persistencia(interval):
+    """Ayuda de la persistencia con ejemplos expresados segun el interval de la medicion."""
+    horas = interval >= 3600
+    ej = ", ".join("{0} ciclos = {1}".format(n, fmt_duracion(n * interval, horas)) for n in (2, 4, 6))
+    return (
+        "\nPersistencia = cantidad minima de CICLOS consecutivos (traceroutes) con la misma longitud de ruta\n"
+        "para que un tramo se considere \"sostenido\" (aparece como bloque y cuenta como cambio de camino).\n"
+        "  - Duracion minima = persistencia x interval.\n"
+        "  - Con el interval de esta medicion ({0}): {1}.\n"
+        "  - Valor bajo (2): detecta episodios cortos, pero tambien mas ruido.\n"
+        "  - Valor alto (4-6): solo cambios estables; descarta parpadeos y desvios breves.\n"
+        "  Elegir: duracion minima que se considera un cambio real / interval "
+        "(ej. {2} de minimo -> 2 ciclos).\n"
+    ).format(fmt_duracion(interval, horas), ej, fmt_duracion(2 * interval, horas))
 
 
 def parse_dt(txt):
@@ -119,6 +143,12 @@ def main():
     ap.add_argument("--start-time", default=None, help="UTC, 'YYYY-MM-DD HH:MM[:SS]'")
     ap.add_argument("--stop-time", default=None, help="UTC, 'YYYY-MM-DD HH:MM[:SS]'")
     ap.add_argument("--max-hops", type=int, default=None, help="default sugerido: {0}".format(MAX_HOPS_SUGERIDO))
+    ap.add_argument("--interval", type=int, default=None,
+                    help="intervalo de la medicion en segundos (RIPE Atlas, campo Interval); solo se usa para la ayuda "
+                         "de la persistencia: <3600 se muestra en minutos, >=3600 en horas")
+    ap.add_argument("--persistencia", type=int, default=None,
+                    help="ciclos minimos para que un tramo de igual longitud sea sostenido (default sugerido: {0}); "
+                         "duracion = ciclos x cadencia".format(PERSISTENCIA_SUGERIDA))
     ap.add_argument("--extractor", default=None, help="nombre o ruta del script extractor")
     ap.add_argument("--output-dir", default=None, help="carpeta del verificador (default: verificacion_<probe-id>)")
     a = ap.parse_args()
@@ -155,6 +185,12 @@ def main():
         a.start_time = a.stop_time = None
     hops = preguntar("Max hops (30 evita truncar rutas largas)", v_entero, a.max_hops, MAX_HOPS_SUGERIDO)
 
+    if a.persistencia is None:
+        interval = preguntar("Interval de la medicion en segundos (RIPE Atlas, campo Interval; ej. 600 = 10 min, 3600 = 1 h)",
+                             v_entero, a.interval)
+        print(ayuda_persistencia(interval))
+    persist = preguntar("Persistencia minima en ciclos", v_entero, a.persistencia, PERSISTENCIA_SUGERIDA)
+
     historial = "historial_traceroute_measurement{0}_probe{1}.csv".format(mid, pid)
     eventos = "eventos_measurement{0}_probe{1}.csv".format(mid, pid)
     outdir = a.output_dir or "verificacion_{0}".format(pid)
@@ -163,8 +199,8 @@ def main():
 
     resumen = []
     with open(logp, "w", encoding="utf-8") as log:
-        log.write("analizar_sonda.py - {0}\nmeasurement={1} probe={2} start={3} stop={4} max_hops={5}\n".format(
-            datetime.now().strftime("%Y-%m-%d %H:%M:%S"), mid, pid, start, stop, hops))
+        log.write("analizar_sonda.py - {0}\nmeasurement={1} probe={2} start={3} stop={4} max_hops={5} persistencia={6}\n".format(
+            datetime.now().strftime("%Y-%m-%d %H:%M:%S"), mid, pid, start, stop, hops, persist))
 
         # ---- 1. extractor
         rc, _ = correr("PASO 1/3 - Extraccion de traceroutes", [
@@ -179,7 +215,8 @@ def main():
             resumen.append(("Eventos del extractor", eventos))
 
         # ---- 2. verificador
-        cmd = [py, verificador, "--historial", historial, "--output-dir", outdir, "--max-hops", str(hops)]
+        cmd = [py, verificador, "--historial", historial, "--output-dir", outdir, "--max-hops", str(hops),
+               "--persistencia", str(persist)]
         if os.path.isfile(eventos):
             cmd += ["--eventos", eventos]
         else:
