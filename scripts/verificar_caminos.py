@@ -941,10 +941,18 @@ function buildGraph(){
   });
   return {nodes:nodes,edges:Object.keys(edges).map(function(k){return edges[k];},{}),total:tot,idx:idx};
 }
-function layoutGraph(g){
+// posicion de los nodos del ciclo seleccionado cuando difiere de su salto modal (p.ej. un desvio con mas saltos)
+function selOverride(g){
+  var o={},sq=seqOf(S.sel);
+  for(var j=1;j<sq.length;j++){var nd=g.nodes[sq[j].k];if(nd&&o[sq[j].k]===undefined&&nd.layer!==j)o[sq[j].k]=j;}
+  return o;
+}
+function layoutGraph(g,over){
+  over=over||{};
   var nodes=g.nodes,keys=Object.keys(nodes),SP=60,GAP=130;
+  keys.forEach(function(k){nodes[k].eff=over[k]!==undefined?over[k]:nodes[k].layer;});
   var layers={};
-  keys.forEach(function(k){var nd=nodes[k];(layers[nd.layer]=layers[nd.layer]||[]).push(nd);});
+  keys.forEach(function(k){var nd=nodes[k];(layers[nd.eff]=layers[nd.eff]||[]).push(nd);});
   var Ls=Object.keys(layers).map(Number).sort(function(a,b){return a-b;});
   var preds={},succs={};
   g.edges.forEach(function(e){(succs[e.a]=succs[e.a]||[]).push(e);(preds[e.b]=preds[e.b]||[]).push(e);});
@@ -971,7 +979,7 @@ function layoutGraph(g){
   }
   // coordenada a lo largo del camino
   if(S.dist==="hops"){
-    keys.forEach(function(k){nodes[k].u=nodes[k].layer*GAP;});
+    keys.forEach(function(k){nodes[k].u=nodes[k].eff*GAP;});
   }else{
     var ms=keys.map(function(k){return nodes[k].rmed;}).filter(function(x){return x!=null&&x>=0;});
     var top=quant(ms,0.98)||1,px=760/Math.max(top,1);
@@ -1001,7 +1009,10 @@ function nodeRole(nd){
 }
 function renderGraph(){
   $("#stage").style.height=S.lay==="v"?"700px":"460px";
-  if(dirtyGraph||!G){G=buildGraph();layoutGraph(G);dirtyGraph=false;}
+  var relay=false;
+  if(dirtyGraph||!G){G=buildGraph();G.over={};G.sig="";dirtyGraph=false;relay=true;}
+  var ov=selOverride(G),sig=JSON.stringify(ov);
+  if(relay||sig!==G.sig){var moved=!relay;G.over=ov;G.sig=sig;layoutGraph(G,ov);if(moved)fitSoon();}
   var g=G,sq=seqOf(S.sel),selNodes={},selEdges={};
   for(var j=0;j<sq.length;j++){selNodes[sq[j].k]=1;if(j>0)selEdges[sq[j-1].k+"|"+sq[j].k]=1;}
   var out=[],tot=Math.max(1,g.total);
@@ -1084,7 +1095,7 @@ function nodeHtml(nd){
     var l=Object.keys(nd.ips).sort(function(a,b){return nd.ips[b]-nd.ips[a];}).slice(0,6);
     if(l.length)h+="<div><span class='k'>IP </span>"+l.map(function(x){return esc(D.ips[x][0])+" ("+nd.ips[x]+")";}).join(", ")+"</div>";
   }
-  h+="<div><span class='k'>Posición </span>"+nd.layer+"</div>";
+  h+="<div><span class='k'>Posición </span>"+nd.layer+(nd.eff!==undefined&&nd.eff!==nd.layer?" <span class='chg'>(en el ciclo seleccionado: "+nd.eff+")</span>":"")+"</div>";
   h+="<div><span class='k'>Ciclos </span>"+nd.n+" ("+(100*nd.n/Math.max(1,g.total)).toFixed(1)+"% del grafo)</div>";
   if(nd.rtts.length)h+="<div><span class='k'>RTT </span>med "+f1(med(nd.rtts))+" · mín "+f1(Math.min.apply(null,nd.rtts))+" · p95 "+f1(quant(nd.rtts,0.95))+"</div>";
   if(role==="tgt")h+="<div><span class='sw' style='background:"+C.tgt+"'></span>Destino en "+nd.tgt+" ciclos</div>";
