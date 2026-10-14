@@ -23,7 +23,7 @@
     --c-rtt: #8b5cf6;       /* 🟣 degradacion RTT */
     --c-len: #d1a013;       /* 🟡 cambio longitud de ruta */
     --c-dst: #e0792c;       /* 🟠 cambio de destino */
-    --c-loss: #3b7fc4;      /* 📉 perdida intermedia */
+    --c-nodest: #475569;    /* 🚫 ciclo sin destino alcanzado */
     --c-none: #9aa2b1;      /* ⚪ sin evento */
 
     color-scheme: light;
@@ -39,6 +39,7 @@
       --fg-faint: #6b7284;
       --accent: #35c2d6;
       --accent-fg: #08191c;
+      --c-nodest: #a8b3c4;
       color-scheme: dark;
     }
   }
@@ -52,6 +53,7 @@
     --fg-faint: #6b7284;
     --accent: #35c2d6;
     --accent-fg: #08191c;
+    --c-nodest: #a8b3c4;
     color-scheme: dark;
   }
 
@@ -228,6 +230,14 @@
     border-radius: 10px; padding: 10px 14px; font-size: 13px; color: var(--fg-dim); line-height: 1.5;
   }
 
+  /* ---- panel de destino ---- */
+  .dest-sum { display: flex; flex-wrap: wrap; gap: 8px 20px; margin-bottom: 12px; color: var(--fg-dim); font-size: 13px; }
+  .dest-sum b { color: var(--fg); font-weight: 600; }
+  .dest-note { color: var(--fg-faint); font-size: 12px; margin-top: 8px; line-height: 1.5; }
+  details.nodest { margin-top: 12px; }
+  details.nodest summary { cursor: pointer; color: var(--fg-dim); font-size: 13px; }
+  .tag-priv { color: var(--c-asn); font-weight: 600; font-size: 11.5px; margin-left: 6px; }
+
   @media (max-width: 480px) {
     .stat .n { font-size: 20px; }
   }
@@ -252,7 +262,11 @@
     </div>
     <div class="meta-field">
       <label>Target</label>
-      <input type="text" id="metaTarget" placeholder="ej. 8.8.8.8">
+      <input type="text" id="metaTarget" placeholder="ej. 8.8.8.8" style="width:230px">
+    </div>
+    <div class="meta-field">
+      <label>ASN destino</label>
+      <input type="text" id="metaAsn" placeholder="—" style="width:90px" readonly>
     </div>
     <div class="meta-field">
       <label>Rango</label>
@@ -285,6 +299,27 @@
   <div class="notice" id="loadNotice" hidden></div>
 
   <div class="stats" id="statCards"></div>
+
+  <div class="panel" id="destPanel" hidden>
+    <h2>Destino</h2>
+    <div class="dest-sum" id="destSummary"></div>
+    <div class="table-wrap">
+      <table style="min-width:420px">
+        <thead><tr><th>IP de destino</th><th>ASN</th><th>Ciclos</th><th>%</th></tr></thead>
+        <tbody id="destBody"></tbody>
+      </table>
+    </div>
+    <div class="dest-note" id="destNote"></div>
+    <details class="nodest" id="noDestDetails" hidden>
+      <summary id="noDestSummary"></summary>
+      <div class="table-wrap" style="margin-top:8px">
+        <table style="min-width:520px">
+          <thead><tr><th>Ciclo</th><th>Saltos</th><th>Último salto</th><th>ASN</th><th>RTT (ms)</th></tr></thead>
+          <tbody id="noDestBody"></tbody>
+        </table>
+      </div>
+    </details>
+  </div>
 
   <div class="panel" id="rangePanel" hidden>
     <h2>Rango de visualización</h2>
@@ -337,12 +372,12 @@
     { key: "asn",  emoji: "🔴", label: "Cambio de ASN",         color: "var(--c-asn)"  },
     { key: "rtt",  emoji: "🟣", label: "Degradación RTT",        color: "var(--c-rtt)"  },
     { key: "len",  emoji: "🟡", label: "Cambio longitud de ruta",color: "var(--c-len)"  },
-    { key: "dst",  emoji: "🟠", label: "Cambio de destino",      color: "var(--c-dst)"  },
-    { key: "loss", emoji: "📉", label: "Pérdida intermedia",     color: "var(--c-loss)"},
     { key: "none", emoji: "⚪", label: "Sin evento",             color: "var(--c-none)"}
   ];
   var CAT_BY_KEY = {};
   CATS.forEach(function (c) { CAT_BY_KEY[c.key] = c; });
+  // Marcador derivado (no es un evento del extractor): ciclo en el que no se llegó al destino.
+  var NODEST = { key: "nodest", emoji: "🚫", label: "Ciclo sin destino", color: "var(--c-nodest)" };
 
   function resolveVar(v) {
     // Resuelve "var(--c-asn)" a un color real leyendo el computed style,
@@ -354,14 +389,12 @@
 
   function classifyLabel(raw) {
     // Intenta mapear un texto de categoría libre (con o sin emoji) a una
-    // de las 6 claves conocidas, por palabras clave. Devuelve "none" si
+    // de las claves conocidas (asn, rtt, len, none), por palabras clave. Devuelve "none" si
     // no reconoce nada (mejor mostrar "sin categorizar" que romper).
     var s = (raw || "").toLowerCase();
     if (/asn|🔴/.test(s)) return "asn";
     if (/rtt|latenc|degrad|🟣/.test(s)) return "rtt";
     if (/longitud|length|hop|🟡/.test(s)) return "len";
-    if (/destino|destination|dst|🟠/.test(s)) return "dst";
-    if (/pérdida|perdida|loss|timeout|📉/.test(s)) return "loss";
     if (/ninguno|none|sin evento|⚪/.test(s)) return "none";
     return "none";
   }
@@ -417,10 +450,8 @@
       { n: 55, cat: "none", rtt: [16, 21] },
       { n: 2,  cat: "asn",  rtt: [30, 44] },
       { n: 48, cat: "none", rtt: [16, 21] },
-      { n: 4,  cat: "loss", rtt: [18, 26] },
-      { n: 60, cat: "none", rtt: [16, 21] },
-      { n: 1,  cat: "dst",  rtt: [20, 30] },
-      { n: 45, cat: "none", rtt: [16, 21] },
+      { n: 64, cat: "none", rtt: [16, 21] },
+      { n: 46, cat: "none", rtt: [16, 21] },
       { n: 2,  cat: "len",  rtt: [22, 34] },
       { n: 70, cat: "none", rtt: [16, 21] },
       { n: 2,  cat: "rtt",  rtt: [95, 130] },
@@ -440,7 +471,7 @@
           // Un mismo ciclo con varios cambios a la vez (longitud + destino +
           // ASN), como el caso real de una redirección DNS/anycast — para
           // que la muestra también ejercite ese caso.
-          ["len", "dst", "asn"].forEach(function (k) {
+          ["len", "asn"].forEach(function (k) {
             events.push({ cycle_number: cycle, timestamp: ts, categoria: CAT_BY_KEY[k].emoji + " " + CAT_BY_KEY[k].label, rtt_ms: rtt.toFixed(1), dst_addr: dst, nota: sampleNote(k, asns, rng) });
           });
         } else if (s.cat !== "none") {
@@ -452,8 +483,6 @@
   }
   function sampleNote(cat, asns, rng) {
     if (cat === "asn") return "cambio " + asns[0] + " → " + asns[1 + Math.floor(rng() * 2)];
-    if (cat === "dst") return "redirección GeoDNS detectada";
-    if (cat === "loss") return "timeout_slots incrementado";
     if (cat === "len") return "acompañado de cambio real de ASN";
     if (cat === "rtt") return "degradación sostenida sobre línea base";
     return "";
@@ -489,7 +518,7 @@
     eventsRaw: [],       // eventos normalizados del archivo de ground-truth
     eventsFilename: null,
     lastLoadInfo: [],    // avisos/advertencias de la última carga (solo lo accionable, no un log de debug)
-    meta: { measurementId: "", probeId: "", target: "", rangeStart: null, rangeEnd: null },
+    meta: { measurementId: "", probeId: "", target: "", asn: "", rangeStart: null, rangeEnd: null },
     metaIsSample: true,        // true mientras los valores de meta vienen del ejemplo (se limpian al cargar datos reales)
     metaUserEdited: { measurementId: false, probeId: false, target: false }, // true solo si el usuario tipeó ahí (nunca se pisa)
     filterFrom: null,    // recorte de fechas para el gráfico/tabla (ms); null = sin recorte
@@ -498,6 +527,7 @@
     fullMax: null
   };
   CATS.forEach(function (c) { state.activeCats[c.key] = true; });
+  state.activeCats.nodest = true;
 
   var FIELD_GUESSES = {
     cycle: ["cycle_number", "cycle", "ciclo", "n_ciclo", "sample", "step"],
@@ -565,7 +595,7 @@
   function loadSample() {
     var sample = buildSampleData();
     var cycles = sample.cycles.map(function (c) {
-      return { cycle: c.cycle_number, ts: c.timestamp, tsMs: parseTsMs(c.timestamp), rtt: Number(c.rtt_ms), dst: c.dst_addr, asn: "" };
+      return { cycle: c.cycle_number, ts: c.timestamp, tsMs: parseTsMs(c.timestamp), rtt: Number(c.rtt_ms), dst: c.dst_addr, asn: "", reached: true, hopCount: null };
     });
     var events = sample.events.map(function (r) {
       return {
@@ -584,6 +614,7 @@
       measurementId: "86710104",
       probeId: "35268",
       target: "8.8.8.8",
+      asn: "",
       rangeStart: cycles.length ? cycles[0].tsMs : null,
       rangeEnd: cycles.length ? cycles[cycles.length - 1].tsMs : null
     };
@@ -628,6 +659,7 @@
     if (!state.metaUserEdited.measurementId) state.meta.measurementId = "";
     if (!state.metaUserEdited.probeId) state.meta.probeId = "";
     if (!state.metaUserEdited.target) state.meta.target = "";
+    state.meta.asn = "";
   }
 
   function maybeSetProbeIdFromFilename(filename) {
@@ -652,6 +684,83 @@
       if (counts[v] > bestN) { bestN = counts[v]; best = v; }
     });
     return best;
+  }
+
+  // ---- Destino alcanzado -------------------------------------------------
+  // El historial no trae dst_addr y el destino puede ser un nombre de dominio que
+  // resuelve a varias IP, así que no se compara con una IP única. Un ciclo "llegó al
+  // destino" si su último salto no es una IP privada/local y pertenece al ASN modal
+  // del último salto, o es una IP frecuente (>= 2% de los ciclos) como último salto.
+  // Mismo criterio que verificar_caminos.py y el bloque final del extractor.
+  function isPrivateIp(ip) {
+    if (!ip) return false;
+    if (ip.indexOf(":") >= 0) {
+      var s6 = ip.toLowerCase();
+      if (s6 === "::1" || s6 === "::") return true;
+      var h = parseInt(s6.split(":")[0] || "0", 16);
+      return (h & 0xfe00) === 0xfc00 || (h & 0xffc0) === 0xfe80;
+    }
+    var p = ip.split(".").map(Number);
+    if (p.length !== 4 || p.some(isNaN)) return false;
+    return p[0] === 10 || p[0] === 127 || p[0] === 0 ||
+      (p[0] === 172 && p[1] >= 16 && p[1] <= 31) || (p[0] === 192 && p[1] === 168) || (p[0] === 169 && p[1] === 254);
+  }
+  function normAsn(a) {
+    a = String(a == null ? "" : a).trim().replace(/^AS/i, "");
+    var l = a.toLowerCase();
+    return (l === "" || l === "unknown" || l === "na" || l === "none" || l === "nan" || l === "null") ? "" : a;
+  }
+  function argmaxKey(obj) {
+    var best = null, bn = 0;
+    for (var k in obj) if (obj[k] > bn) { bn = obj[k]; best = k; }
+    return best;
+  }
+  function classifyReach(cycles) {
+    var n = cycles.length, cntIp = {}, cntAsn = {}, asnOfIp = {};
+    cycles.forEach(function (c) {
+      c.priv = isPrivateIp(c.ip);
+      c.asn = normAsn(c.asn);
+      if (!c.ip || c.priv) return;
+      cntIp[c.ip] = (cntIp[c.ip] || 0) + 1;
+      if (c.asn) {
+        cntAsn[c.asn] = (cntAsn[c.asn] || 0) + 1;
+        (asnOfIp[c.ip] = asnOfIp[c.ip] || {})[c.asn] = ((asnOfIp[c.ip] || {})[c.asn] || 0) + 1;
+      }
+    });
+    var asnModal = argmaxKey(cntAsn);
+    var freq = {};
+    Object.keys(cntIp).forEach(function (ip) {
+      if (cntIp[ip] < Math.max(1, 0.02 * n)) return;
+      var m = asnOfIp[ip] ? argmaxKey(asnOfIp[ip]) : null;
+      if (asnModal === null || m === null || m === asnModal) freq[ip] = true;
+    });
+    cycles.forEach(function (c) {
+      c.reached = !!c.ip && !c.priv && ((asnModal !== null && c.asn === asnModal) || freq[c.ip] === true);
+    });
+    if (!cycles.some(function (c) { return c.reached; })) cycles.forEach(function (c) { c.reached = true; });
+    return asnModal;
+  }
+  // Resumen del destino sobre una lista de ciclos (ya recortada por rango de fechas si corresponde).
+  function summarizeDest(cycles) {
+    var ok = cycles.filter(function (c) { return c.reached !== false; });
+    var bad = cycles.filter(function (c) { return c.reached === false; });
+    var ips = {}, asnCnt = {};
+    ok.forEach(function (c) {
+      if (!c.dst) return;
+      var o = ips[c.dst] || (ips[c.dst] = { n: 0, asn: {} });
+      o.n++;
+      if (c.asn) { o.asn[c.asn] = (o.asn[c.asn] || 0) + 1; asnCnt[c.asn] = (asnCnt[c.asn] || 0) + 1; }
+    });
+    var list = Object.keys(ips).map(function (ip) { return { ip: ip, n: ips[ip].n, asn: argmaxKey(ips[ip].asn) || "" }; })
+      .sort(function (a, b) { return b.n - a.n; });
+    // cambios de IP de destino entre ciclos consecutivos con destino
+    var sorted = ok.slice().sort(function (a, b) { return (a.tsMs || 0) - (b.tsMs || 0); });
+    var chSame = 0, chOther = 0;
+    for (var i = 1; i < sorted.length; i++) {
+      var a = sorted[i - 1], b = sorted[i];
+      if (a.dst && b.dst && a.dst !== b.dst) { if (a.asn === b.asn) chSame++; else chOther++; }
+    }
+    return { total: cycles.length, ok: ok.length, bad: bad, ips: list, asn: argmaxKey(asnCnt), chSame: chSame, chOther: chOther };
   }
 
   // ---- Archivo de mediciones crudas: timestamp, hop, ip, asn, rtt_ms ----
@@ -688,6 +797,7 @@
       if (map.hop) {
         var bestHop = -Infinity;
         rows.forEach(function (r) {
+          if (map.ip && !r[map.ip]) return; // salto sin respuesta (*): no es el último salto que respondió
           var h = Number(r[map.hop]);
           if (!isNaN(h) && h > bestHop) { bestHop = h; best = r; }
         });
@@ -704,15 +814,22 @@
     }).filter(function (c) { return c.tsMs != null; });
     cycles.sort(function (a, b) { return a.tsMs - b.tsMs; });
 
+    // Destino alcanzado / no alcanzado por ciclo (requiere la columna ip).
+    var asnModal = null;
+    if (map.ip) asnModal = classifyReach(cycles);
+    else cycles.forEach(function (c) { c.reached = true; c.asn = normAsn(c.asn); });
+
     state.rawCycles = cycles;
     state.rawFilename = filename;
     clearSampleMetaIfNeeded();
     maybeSetProbeIdFromFilename(filename);
     maybeSetMeasurementIdFromFilename(filename);
-    if (!state.metaUserEdited.target) {
-      var t = modeOf(cycles.map(function (c) { return c.ip; }));
-      if (t) state.meta.target = t;
+    // Target = IP(s) de destino de los ciclos que llegaron al destino (un dominio puede resolver a varias).
+    var ds = summarizeDest(cycles.map(function (c) { return { dst: c.ip, asn: c.asn, reached: c.reached, tsMs: c.tsMs }; }));
+    if (!state.metaUserEdited.target && ds.ips.length) {
+      state.meta.target = ds.ips[0].ip + (ds.ips.length > 1 ? "  (+" + (ds.ips.length - 1) + " IP)" : "");
     }
+    state.meta.asn = asnModal ? "AS" + asnModal : (ds.asn ? "AS" + ds.asn : "");
 
     state.lastLoadInfo = [];
     if (!cycles.length) {
@@ -782,7 +899,9 @@
 
     if (state.rawCycles.length) {
       var cycles = state.rawCycles.map(function (c, i) {
-        return { cycle: i + 1, ts: c.tsRaw, tsMs: c.tsMs, rtt: c.rtt, dst: c.ip || "", asn: c.asn || "" };
+        // El RTT de un ciclo sin destino (último salto = red local) no es el RTT al destino: queda fuera de la línea.
+        return { cycle: i + 1, ts: c.tsRaw, tsMs: c.tsMs, rtt: c.reached === false ? null : c.rtt, rttRaw: c.rtt,
+                 dst: c.ip || "", asn: c.asn || "", reached: c.reached !== false, hopCount: c.hopCount };
       });
       state.cycleRecs = cycles;
 
@@ -803,7 +922,8 @@
             if (diff < bestDiff) { bestDiff = diff; best = c; }
           });
           if (best && bestDiff <= TOL) {
-            eventRows.push({ cycle: best.cycle, ts: best.ts, tsMs: best.tsMs, rtt: best.rtt, dst: best.dst, asn: best.asn, catKey: ev.catKey, catRaw: ev.catRaw, note: "" });
+            eventRows.push({ cycle: best.cycle, ts: best.ts, tsMs: best.tsMs, rtt: best.rtt, dst: best.dst, asn: best.asn, catKey: ev.catKey, catRaw: ev.catRaw,
+              note: best.reached === false ? "ciclo sin destino alcanzado: evento posiblemente espurio" : "" });
           } else unmatched++;
         });
         if (unmatched > 0) {
@@ -976,6 +1096,7 @@
     document.getElementById("metaMeasurement").value = state.meta.measurementId || "";
     document.getElementById("metaProbe").value = state.meta.probeId || "";
     document.getElementById("metaTarget").value = state.meta.target || "";
+    document.getElementById("metaAsn").value = state.meta.asn || "";
     var r = (state.meta.rangeStart != null && state.meta.rangeEnd != null)
       ? fmtTick(state.meta.rangeStart) + "  →  " + fmtTick(state.meta.rangeEnd)
       : "—";
@@ -987,10 +1108,55 @@
   // -------------------------------------------------------------------
   function render() {
     renderRangeSummary();
+    renderDest();
     renderStats();
     renderLegend();
     renderChart();
     renderTable();
+  }
+
+  function fmtPct(n, d) { return d ? (100 * n / d).toFixed(1) + "%" : "—"; }
+  function escHtml(t) { return String(t).replace(/[&<>"]/g, function (c) { return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]; }); }
+
+  function renderDest() {
+    var panel = document.getElementById("destPanel");
+    var cyc = scopedCycles();
+    if (!cyc.length || cyc[0].dst === undefined || state.isEventOnly) { panel.hidden = true; return; }
+    var ds = summarizeDest(cyc);
+    if (!ds.ips.length) { panel.hidden = true; return; }
+    panel.hidden = false;
+    document.getElementById("destSummary").innerHTML =
+      "<span>ASN de destino: <b>" + (ds.asn ? "AS" + escHtml(ds.asn) : "—") + "</b></span>" +
+      "<span>IP de destino: <b>" + ds.ips.length + "</b></span>" +
+      "<span>Ciclos con destino: <b>" + ds.ok + "</b> de " + ds.total + " (" + fmtPct(ds.ok, ds.total) + ")</span>" +
+      "<span>Sin destino: <b>" + ds.bad.length + "</b></span>";
+    var rows = ds.ips.slice(0, 12).map(function (o) {
+      return "<tr><td class='mono'>" + escHtml(o.ip) + "</td><td class='mono'>" + (o.asn ? "AS" + escHtml(o.asn) : "—") + "</td>" +
+        "<td class='tabnum'>" + o.n + "</td><td class='tabnum'>" + fmtPct(o.n, ds.ok) + "</td></tr>";
+    });
+    if (ds.ips.length > 12) rows.push("<tr><td colspan='4' class='mono' style='color:var(--fg-faint)'>… " + (ds.ips.length - 12) + " IP más</td></tr>");
+    document.getElementById("destBody").innerHTML = rows.join("");
+    var note = "";
+    if (ds.ips.length > 1) {
+      note = "El destino responde desde " + ds.ips.length + " IP distintas (típico de un nombre de dominio con balanceo DNS). " +
+        "Entre ciclos consecutivos la IP cambió " + (ds.chSame + ds.chOther) + " veces (" + ds.chSame + " dentro del mismo ASN, " + ds.chOther +
+        " hacia otro ASN): un cambio de IP dentro del mismo ASN no es un cambio de ruta.";
+    }
+    document.getElementById("destNote").textContent = note;
+    var det = document.getElementById("noDestDetails");
+    if (ds.bad.length) {
+      det.hidden = false;
+      var priv = ds.bad.filter(function (c) { return c.priv || isPrivateIp(c.dst); }).length;
+      document.getElementById("noDestSummary").textContent = ds.bad.length + " ciclos no llegaron al destino (" + priv + " con último salto en IP privada: red local de la sonda). Ver detalle";
+      document.getElementById("noDestBody").innerHTML = ds.bad.slice(0, 50).map(function (c) {
+        var p = isPrivateIp(c.dst);
+        return "<tr><td class='mono'>" + escHtml(c.ts) + "</td><td class='tabnum'>" + (c.hopCount == null ? "—" : c.hopCount) + "</td>" +
+          "<td class='mono'>" + escHtml(c.dst || "—") + (p ? "<span class='tag-priv'>PRIVADA</span>" : "") + "</td>" +
+          "<td class='mono'>" + (c.asn ? "AS" + escHtml(c.asn) : "—") + "</td><td class='tabnum'>" + (c.rttRaw != null && !isNaN(c.rttRaw) ? c.rttRaw.toFixed(1) : "—") + "</td></tr>";
+      }).join("") + (ds.bad.length > 50 ? "<tr><td colspan='5' class='mono' style='color:var(--fg-faint)'>… " + (ds.bad.length - 50) + " ciclos más</td></tr>" : "");
+    } else {
+      det.hidden = true;
+    }
   }
 
   function visibleRecords() {
@@ -1001,13 +1167,10 @@
     var wrap = document.getElementById("statCards");
     wrap.innerHTML = "";
     var scoped = scopedRecords();
-    // 🔧 2026-10-02 — "loss" (📉 pérdida intermedia) se excluye de las
-    // métricas de "cambio" (Eventos detectados / Ciclos con cambios / Tasa
-    // de cambios), igual que ahora hace extract_traceroute_v2.py (FIX #13):
-    // sigue siendo observable -- se grafica, se lista en la tabla y tiene
-    // su propia tarjeta más abajo -- pero deja de contar como "change" acá
-    // también, para no divergir del criterio de Path Analysis.
-    var events = scoped.filter(function (r) { return r.catKey !== "none" && r.catKey !== "loss"; });
+    // Las categorías del extractor son asn, rtt y len (la pérdida intermedia y el
+    // cambio de destino ya no se emiten como eventos). "Sin destino" y "Cambio de IP
+    // de destino" se calculan acá desde las mediciones crudas, no son eventos.
+    var events = scoped.filter(function (r) { return r.catKey !== "none"; });
 
     if (state.isEventOnly) {
       // Sin columna de ciclo, no hay forma honesta de saber cuántos
@@ -1040,13 +1203,21 @@
       addStat(wrap, pct, "Tasa de cambios", null);
     }
 
-    // Las tarjetas por categoría (incluida 📉 Pérdida intermedia) siguen
-    // mostrando su conteo real sin filtrar -- son observacionales y no
-    // alimentan "Ciclos con cambios"/"Tasa de cambios" de arriba.
     CATS.filter(function (c) { return c.key !== "none"; }).forEach(function (c) {
       var n = scoped.filter(function (r) { return r.catKey === c.key; }).length;
       addStat(wrap, String(n), c.emoji + " " + c.label, c.color);
     });
+    // Tarjetas derivadas de las mediciones crudas (no alimentan "Ciclos con cambios" ni "Tasa de cambios").
+    if (!state.isEventOnly) {
+      var cyc = scopedCycles();
+      if (cyc.length && cyc[0].dst !== undefined) {
+        var ds = summarizeDest(cyc);
+        addStat(wrap, String(ds.bad.length), NODEST.emoji + " " + NODEST.label + " (destino no alcanzado)", NODEST.color);
+        addStat(wrap, String(ds.chSame + ds.chOther),
+          "🟠 Cambio de IP de destino<br><span class='mono' style='color:var(--fg-faint);font-size:11px'>mismo ASN: " + ds.chSame + " · otro ASN: " + ds.chOther + "</span>",
+          "var(--c-dst)");
+      }
+    }
   }
   function fmtSpan(ms) {
     var h = ms / 3600000;
@@ -1068,8 +1239,13 @@
     var wrap = document.getElementById("legend");
     wrap.innerHTML = "";
     var scoped = scopedRecords();
-    CATS.forEach(function (c) {
-      var n = scoped.filter(function (r) { return r.catKey === c.key; }).length;
+    var legendItems = CATS.slice();
+    var cycScoped = scopedCycles();
+    if (cycScoped.some(function (c) { return c.reached === false; })) legendItems.push(NODEST);
+    legendItems.forEach(function (c) {
+      var n = c.key === "nodest"
+        ? cycScoped.filter(function (r) { return r.reached === false; }).length
+        : scoped.filter(function (r) { return r.catKey === c.key; }).length;
       var chip = document.createElement("div");
       chip.className = "chip" + (state.activeCats[c.key] ? "" : " off");
       chip.style.setProperty("--chip-color", resolveVar(c.color));
@@ -1177,7 +1353,7 @@
     var tooltip = document.getElementById("tooltip");
     var visible = events.filter(function (r) { return r.catKey !== "none" && state.activeCats[r.catKey]; })
       .sort(function (a, b) { return a[xKey] - b[xKey]; });
-    var baseY = hasRtt ? null : (H - PAD_B - 10);
+    var baseY = H - PAD_B - 10; // eventos sin RTT (p. ej. ciclo sin destino) se apoyan en el eje
     var lastPx = null, stack = 0;
     var PX_TOL = 4, STACK_STEP = 9;
     visible.forEach(function (r) {
@@ -1204,6 +1380,28 @@
       circle.addEventListener("mouseleave", function () { tooltip.classList.remove("show"); });
       svg.appendChild(circle);
     });
+
+    // ciclos en los que no se llegó al destino: línea vertical tenue + marcador sobre el eje
+    if (state.activeCats.nodest) {
+      var nd = cycles.filter(function (c) { return c.reached === false; });
+      nd.forEach(function (c) {
+        var px = x(c[xKey]);
+        if (nd.length <= 300) svg.insertBefore(el("line", { x1: px.toFixed(1), x2: px.toFixed(1), y1: PAD_T, y2: H - PAD_B, stroke: resolveVar(NODEST.color), "stroke-width": 1, "stroke-dasharray": "3 3", opacity: 0.45 }), svg.querySelector(".point"));
+        var m = el("rect", { class: "point", x: (px - 4.5).toFixed(1), y: (H - PAD_B - 9).toFixed(1), width: 9, height: 9, transform: "rotate(45 " + px.toFixed(1) + " " + (H - PAD_B - 4.5).toFixed(1) + ")",
+          fill: resolveVar(NODEST.color), stroke: "var(--surface)", "stroke-width": 1 });
+        m.addEventListener("mousemove", function (ev) {
+          tooltip.innerHTML = NODEST.emoji + " " + NODEST.label + "<br>" + (c.ts || "ciclo " + c.cycle) +
+            "<br>último salto: " + (c.dst || "—") + (isPrivateIp(c.dst) ? " (IP privada)" : "") +
+            (c.hopCount != null ? "<br>" + c.hopCount + " saltos" : "") +
+            (c.rttRaw != null && !isNaN(c.rttRaw) ? " · " + c.rttRaw.toFixed(1) + "ms" : "");
+          tooltip.style.left = ev.clientX + "px";
+          tooltip.style.top = (ev.clientY - 10) + "px";
+          tooltip.classList.add("show");
+        });
+        m.addEventListener("mouseleave", function () { tooltip.classList.remove("show"); });
+        svg.appendChild(m);
+      });
+    }
   }
 
   // -------------------------------------------------------------------
