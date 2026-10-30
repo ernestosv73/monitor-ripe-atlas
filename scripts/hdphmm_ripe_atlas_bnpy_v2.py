@@ -2,13 +2,21 @@
 """
 =============================================================================
 HDP-HMM con bnpy para Segmentación de Latencia en RIPE Atlas
-+ Correlación con Path Analysis, Análisis de Residuos,
-  Fusión de Estados (Manual y Automática) y Detección de Longitud del Path
++ Caracterización de Segmentos y Detección de Cambios Topológicos
++ Fusión de Estados (Manual y Automática por Bhattacharyya)
++ Detección de Longitud del Path
 =============================================================================
 Basado en: Mouchet et al., "Large-Scale Characterization and Segmentation of
            Internet Path Delays with Infinite HMMs" (arXiv:1910.12714)
 
 Entorno: Python 2.7 + bnpy (build 8019474-py27_1) + numpy 1.16.6 + scipy 1.2.1
+
+CAMBIOS EN ESTA VERSIÓN:
+- Eliminada la correlación con Path Analysis como métrica principal
+- Path Analysis se usa solo para detectar cambios topológicos (cambio_ip_asn, cambio_longitud)
+- Agregada caracterización detallada de segmentos (duración, media, std, tipo de degradación)
+- Agregadas métricas de calidad de segmentación (varianza intra/inter, ratio de calidad)
+- Nuevos archivos de salida con estadísticas completas
 =============================================================================
 """
 from __future__ import print_function, division
@@ -49,24 +57,6 @@ DESCRIPCION_MACRO_ESTADOS = {
 # ============================================================================
 # UTILIDADES Y ESTRUCTURAS DE DATOS
 # ============================================================================
-class UnionFind:
-    """Estructura de datos para agrupamiento eficiente (Componentes Conectados)."""
-    def __init__(self, elements):
-        self.parent = {e: e for e in elements}
-        
-    def find(self, i):
-        if self.parent[i] == i:
-            return i
-        self.parent[i] = self.find(self.parent[i])
-        return self.parent[i]
-        
-    def union(self, i, j):
-        root_i = self.find(i)
-        root_j = self.find(j)
-        if root_i != root_j:
-            self.parent[root_i] = root_j
-
-
 def extraer_ids_de_archivo(filename):
     basename = os.path.basename(filename)
     match = re.search(r'measurement(\d+)_probe(\d+)', basename)
@@ -160,7 +150,11 @@ def cargar_csv_crudo(input_path, dest_hop=None):
 
 
 def cargar_categorias(path_csv):
-    print("[FASE 1] Cargando categorías: {}".format(path_csv))
+    """
+    Carga el CSV de categorías del Path Analysis.
+    Solo se utilizan para detectar cambios topológicos (cambio_ip_asn, cambio_longitud).
+    """
+    print("[FASE 1] Cargando categorías Path Analysis (solo cambios topológicos): {}".format(path_csv))
     dict_categorias = defaultdict(lambda: {'categorias': set(), 'conteo': 0})
     
     with open(path_csv, 'r') as f:
@@ -170,18 +164,13 @@ def cargar_categorias(path_csv):
             n_lineas += 1
             ts = row['timestamp'].strip()
             cat = row['categoria'].strip()
-            dict_categorias[ts]['categorias'].add(cat)
-            dict_categorias[ts]['conteo'] += 1
+            # Solo nos interesan cambios topológicos
+            if cat in ['cambio_ip_asn', 'cambio_longitud']:
+                dict_categorias[ts]['categorias'].add(cat)
+                dict_categorias[ts]['conteo'] += 1
     
     print("  - Líneas procesadas: {}".format(n_lineas))
-    print("  - Timestamps con eventos: {}".format(len(dict_categorias)))
-    todas_cats = defaultdict(int)
-    for info in dict_categorias.values():
-        for c in info['categorias']:
-            todas_cats[c] += 1
-    print("  - Distribución de categorías:")
-    for cat, count in sorted(todas_cats.items(), key=lambda x: -x[1]):
-        print("      {}: {} timestamps".format(cat, count))
+    print("  - Eventos topológicos: {}".format(len(dict_categorias)))
     return dict(dict_categorias)
 
 
@@ -278,7 +267,7 @@ def correr_hdphmm(secuencias, K, nlap, transAlpha, startAlpha, hmmKappa, sF, see
 
 
 # ============================================================================
-# FASE 3b: FUSIÓN DE ESTADOS (MANUAL O AUTOMÁTICA)
+# FASE 3b: FUSIÓN DE ESTADOS (MANUAL O AUTOMÁTICA POR BHATTACHARYYA)
 # ============================================================================
 def fusionar_estados_manual(estados_por_secuencia, mapa_macro):
     print("\n[FASE 3b] Fusionando estados manualmente...")
@@ -287,19 +276,33 @@ def fusionar_estados_manual(estados_por_secuencia, mapa_macro):
     return estados_fusionados
 
 
-def fusionar_estados_automatico(estados_por_secuencia, todos_rtts, umbral_media, umbral_std):
+def _distancia_bhattacharyya(m1, s1, m2, s2):
     """
-    Fusiona estados automáticamente usando componentes conectados (Union-Find).
-    Dos estados se fusionan si:
-      |media_i - media_j| < umbral_media  Y  |std_i - std_j| < umbral_std
+    Calcula la Distancia de Bhattacharyya entre dos distribuciones Gaussianas.
     """
-    print("\n[FASE 3b] Fusionando estados automáticamente...")
-    print("  - Umbrales: media={:.1f}ms, std={:.1f}ms".format(umbral_media, umbral_std))
+    s1 = max(s1, 1e-6)
+    s2 = max(s2, 1e-6)
+    
+    var1 = s1 * s1
+    var2 = s2 * s2
+    var_sum = var1 + var2
+    
+    term1 = 0.25 * ((m1 - m2) ** 2) / var_sum
+    term2 = 0.5 * np.log(var_sum / (2.0 * s1 * s2))
+    return float(term1 + term2)
+
+
+def fusionar_estados_automatico(estados_por_secuencia, todos_rtts, umbral_db):
+    """
+    Fusiona estados automáticamente usando la Distancia de Bhattacharyya
+    y Agrupamiento Jerárquico Aglomerativo con Complete Linkage.
+    """
+    print("\n[FASE 3b] Fusionando estados automáticamente (Bhattacharyya + Complete Linkage)...")
+    print("  - Umbral D_B: {:.2f} (menor = más estricto)".format(umbral_db))
     
     flat_states = [int(e) for arr in estados_por_secuencia for e in arr]
     unique_states = sorted(set(flat_states))
     
-    # Calcular estadísticas
     stats = {}
     for s in unique_states:
         indices = [i for i, x in enumerate(flat_states) if x == s]
@@ -310,32 +313,61 @@ def fusionar_estados_automatico(estados_por_secuencia, todos_rtts, umbral_media,
             'count': len(rtts_s)
         }
     
-    # Agrupamiento por Union-Find
-    uf = UnionFind(unique_states)
-    for i in range(len(unique_states)):
-        for j in range(i + 1, len(unique_states)):
+    n = len(unique_states)
+    db_matrix = np.zeros((n, n))
+    for i in range(n):
+        for j in range(i + 1, n):
             s1, s2 = unique_states[i], unique_states[j]
-            diff_media = abs(stats[s1]['mean'] - stats[s2]['mean'])
-            diff_std = abs(stats[s1]['std'] - stats[s2]['std'])
-            
-            if diff_media < umbral_media and diff_std < umbral_std:
-                uf.union(s1, s2)
+            d = _distancia_bhattacharyya(stats[s1]['mean'], stats[s1]['std'],
+                                         stats[s2]['mean'], stats[s2]['std'])
+            db_matrix[i, j] = d
+            db_matrix[j, i] = d
     
-    # Construir clusters y mapa
-    clusters = defaultdict(list)
-    for s in unique_states:
-        clusters[uf.find(s)].append(s)
+    print("  - Matriz de distancias D_B calculada ({} estados)".format(n))
     
-    # Asignar IDs de macro-estados ordenados por el estado original más bajo
+    clusters = [[s] for s in unique_states]
+    
+    iteracion = 0
+    merged = True
+    while merged:
+        merged = False
+        iteracion += 1
+        min_dist = float('inf')
+        best_i, best_j = -1, -1
+        
+        for i in range(len(clusters)):
+            for j in range(i + 1, len(clusters)):
+                max_db = 0.0
+                for s_i in clusters[i]:
+                    idx_i = unique_states.index(s_i)
+                    for s_j in clusters[j]:
+                        idx_j = unique_states.index(s_j)
+                        db = db_matrix[idx_i, idx_j]
+                        if db > max_db:
+                            max_db = db
+                
+                if max_db < min_dist:
+                    min_dist = max_db
+                    best_i, best_j = i, j
+        
+        if min_dist <= umbral_db:
+            clusters[best_i] = clusters[best_i] + clusters[best_j]
+            clusters.pop(best_j)
+            merged = True
+            print("    [Iter {}] Fusionados clústeres (D_B máx = {:.3f} <= {:.2f})".format(
+                iteracion, min_dist, umbral_db))
+        else:
+            print("    [Iter {}] Distancia mínima entre clústeres = {:.3f} > umbral {:.2f}. STOP.".format(
+                iteracion, min_dist, umbral_db))
+    
     mapa_fusion = {}
-    sorted_clusters = sorted(clusters.items(), key=lambda x: min(x[1]))
+    sorted_clusters = sorted(clusters, key=lambda cluster: min(stats[s]['mean'] for s in cluster))
     
-    print("  - Mapa de fusión generado:")
-    for macro_id, (root, members) in enumerate(sorted_clusters):
-        # Calcular stats combinadas para el macro-estado
+    print("  - Mapa de fusión generado ({} macro-estados):".format(len(sorted_clusters)))
+    for macro_id, cluster in enumerate(sorted_clusters):
         all_rtts = []
-        for m in members:
-            indices = [i for i, x in enumerate(flat_states) if x == m]
+        for s in cluster:
+            indices = [i for i, x in enumerate(flat_states) if x == s]
             all_rtts.extend([todos_rtts[i] for i in indices])
         
         macro_mean = np.mean(all_rtts)
@@ -344,12 +376,13 @@ def fusionar_estados_automatico(estados_por_secuencia, todos_rtts, umbral_media,
         macro_pct = 100.0 * macro_count / len(flat_states)
         
         print("      Macro-Estado {}: estados {} | RTT={:.2f}±{:.2f}ms ({} pts, {:.1f}%)".format(
-            macro_id, members, macro_mean, macro_std, macro_count, macro_pct))
+            macro_id, sorted(cluster), macro_mean, macro_std, macro_count, macro_pct))
         
-        for m in members:
-            mapa_fusion[m] = macro_id
+        for s in cluster:
+            mapa_fusion[s] = macro_id
     
     estados_fusionados = [[mapa_fusion[int(e)] for e in seq] for seq in estados_por_secuencia]
+    
     return estados_fusionados, mapa_fusion
 
 
@@ -415,7 +448,7 @@ def detectar_change_points(secuencias, estados_por_secuencia):
 # ============================================================================
 def incorporar_cambios_longitud(cambios_longitud, dict_categorias):
     if not cambios_longitud: return dict_categorias
-    print("[FASE 5b] Incorporando {} cambios de longitud como eventos...".format(len(cambios_longitud)))
+    print("[FASE 5b] Incorporando {} cambios de longitud como eventos topológicos...".format(len(cambios_longitud)))
     dict_extendido = defaultdict(lambda: {'categorias': set(), 'conteo': 0})
     for ts, info in dict_categorias.items():
         dict_extendido[ts] = {'categorias': set(info['categorias']), 'conteo': info['conteo']}
@@ -427,78 +460,164 @@ def incorporar_cambios_longitud(cambios_longitud, dict_categorias):
 
 
 # ============================================================================
-# FASE 6: CORRELACIÓN CON PATH ANALYSIS
+# FASE 6: CARACTERIZACIÓN DETALLADA DE SEGMENTOS
 # ============================================================================
-def correlacionar_con_categorias(change_points, dict_categorias):
-    print("[FASE 6] Correlacionando con Path Analysis (tolerancia: {} min)...".format(TOLERANCIA_MINUTOS))
+def caracterizar_segmentos(serie_completa, secuencias, estados_por_secuencia, estados_suaves_por_secuencia):
+    """
+    Caracteriza cada segmento con estadísticas completas y clasifica el tipo de degradación.
+    """
+    print("\n[FASE 6] Caracterizando segmentos...")
+    
+    segmentos = []
+    timestamps_ordenados = [ts for ts, _ in serie_completa]
+    
+    for seq_id, (seq, estados_crudos, estados_suaves) in enumerate(zip(secuencias, estados_por_secuencia, estados_suaves_por_secuencia)):
+        # Identificar segmentos dentro de esta secuencia
+        segmentos_seq = []
+        start_idx = 0
+        estado_actual = estados_suaves[0]
+        
+        for i in range(1, len(estados_suaves)):
+            if estados_suaves[i] != estado_actual:
+                # Fin del segmento actual
+                segmentos_seq.append({
+                    'seq_id': seq_id,
+                    'estado': int(estado_actual),
+                    'start_idx_global': start_idx,
+                    'end_idx_global': i - 1,
+                    'start_ts': seq[start_idx][0],
+                    'end_ts': seq[i - 1][0],
+                    'n_ciclos': i - start_idx
+                })
+                start_idx = i
+                estado_actual = estados_suaves[i]
+        
+        # Último segmento
+        segmentos_seq.append({
+            'seq_id': seq_id,
+            'estado': int(estado_actual),
+            'start_idx_global': start_idx,
+            'end_idx_global': len(estados_suaves) - 1,
+            'start_ts': seq[start_idx][0],
+            'end_ts': seq[-1][0],
+            'n_ciclos': len(estados_suaves) - start_idx
+        })
+        
+        # Calcular estadísticas para cada segmento
+        for seg in segmentos_seq:
+            rtts_seg = [serie_completa[idx][1] for idx in range(seg['start_idx_global'], seg['end_idx_global'] + 1)]
+            seg['media'] = float(np.mean(rtts_seg))
+            seg['mediana'] = float(np.median(rtts_seg))
+            seg['std'] = float(np.std(rtts_seg))
+            seg['min'] = float(np.min(rtts_seg))
+            seg['max'] = float(np.max(rtts_seg))
+            seg['duracion_minutos'] = seg['n_ciclos'] * 10  # Asumiendo cadencia de 10 min
+        
+        segmentos.extend(segmentos_seq)
+    
+    print("  - Total de segmentos caracterizados: {}".format(len(segmentos)))
+    return segmentos
+
+
+def calcular_calidad_segmentacion(serie_completa, segmentos):
+    """
+    Calcula métricas de calidad de la segmentación:
+    - Varianza intra-segmento (homogeneidad interna)
+    - Varianza inter-segmento (separación entre segmentos)
+    - Ratio de calidad (inter/intra)
+    """
+    rtts = [rtt for _, rtt in serie_completa]
+    media_global = np.mean(rtts)
+    n_total = len(rtts)
+    
+    # Varianza intra-segmento (promedio ponderado)
+    var_intra_total = 0.0
+    for seg in segmentos:
+        n_seg = seg['n_ciclos']
+        var_intra_total += (n_seg / n_total) * (seg['std'] ** 2)
+    
+    # Varianza inter-segmento
+    var_inter = 0.0
+    for seg in segmentos:
+        n_seg = seg['n_ciclos']
+        var_inter += (n_seg / n_total) * ((seg['media'] - media_global) ** 2)
+    
+    # Ratio de calidad (mayor es mejor)
+    ratio_calidad = var_inter / max(var_intra_total, 1e-10)
+    
+    return {
+        'varianza_intra': var_intra_total,
+        'varianza_inter': var_inter,
+        'ratio_calidad': ratio_calidad,
+        'duracion_media_segmentos': np.mean([s['duracion_minutos'] for s in segmentos]),
+        'n_segmentos': len(segmentos)
+    }
+
+
+def clasificar_tipo_degradacion(segmento, media_global):
+    """
+    Clasifica un segmento según su tipo de degradación basado en magnitud y duración.
+    """
+    desviacion = segmento['media'] - media_global
+    duracion = segmento['duracion_minutos']
+    
+    if duracion > 60 and abs(desviacion) > 5:
+        return 'degradacion_severa_sostenida'
+    elif duracion > 30 and abs(desviacion) > 2:
+        return 'degradacion_moderada_sostenida'
+    elif duracion < 10 and abs(desviacion) > 10:
+        return 'pico_transitorio'
+    elif abs(desviacion) < 1:
+        return 'regimen_base'
+    else:
+        return 'variacion_normal'
+
+
+# ============================================================================
+# FASE 7: DETECCIÓN DE CAMBIOS TOPOLÓGICOS
+# ============================================================================
+def detectar_cambios_topologicos(change_points, dict_categorias):
+    """
+    Detecta qué change-points coinciden con eventos topológicos del Path Analysis.
+    """
+    print("\n[FASE 7] Detectando cambios topológicos...")
+    
     cp_dt = {}
     for cp in change_points:
-        try: cp_dt[cp['timestamp']] = datetime.strptime(cp['timestamp'], "%Y-%m-%d %H:%M:%S")
-        except ValueError: continue
+        try:
+            cp_dt[cp['timestamp']] = datetime.strptime(cp['timestamp'], "%Y-%m-%d %H:%M:%S")
+        except (ValueError, TypeError):
+            continue
     
     cat_dt = {}
     for ts_str in dict_categorias.keys():
-        try: cat_dt[ts_str] = datetime.strptime(ts_str, "%Y-%m-%d %H:%M:%S")
-        except ValueError: continue
+        try:
+            cat_dt[ts_str] = datetime.strptime(ts_str, "%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            continue
     
-    resultados = []
     n_coincidencias = 0
     for cp in change_points:
-        ts_cp_str = cp['timestamp']
-        if ts_cp_str not in cp_dt: continue
-        ts_cp = cp_dt[ts_cp_str]
-        categorias_ventana = defaultdict(int)
+        ts = cp['timestamp']
+        if ts not in cp_dt:
+            continue
+        ts_dt = cp_dt[ts]
+        
         for ts_str, dt_cat in cat_dt.items():
-            diff_min = abs((ts_cp - dt_cat).total_seconds()) / 60.0
+            diff_min = abs((ts_dt - dt_cat).total_seconds()) / 60.0
             if diff_min <= TOLERANCIA_MINUTOS:
-                for cat in dict_categorias[ts_str]['categorias']:
-                    categorias_ventana[cat] += 1
-        
-        if categorias_ventana:
-            cat_dominante = max(categorias_ventana.items(), key=lambda x: x[1])[0]
-            coincide = True
-            n_coincidencias += 1
+                cp['evento_topologico'] = True
+                cp['categorias_topologicas'] = dict_categorias[ts_str]['categorias']
+                n_coincidencias += 1
+                break
         else:
-            cat_dominante = None
-            coincide = False
-        
-        resultados.append({
-            'timestamp': ts_cp_str, 'estado_anterior': cp['estado_anterior'],
-            'estado_nuevo': cp['estado_nuevo'], 'categoria_path_analysis': cat_dominante,
-            'categorias_en_ventana': dict(categorias_ventana), 'coincide': coincide
-        })
-    print("  - Change-points con evento correspondiente: {}/{} ({:.1f}%)".format(
+            cp['evento_topologico'] = False
+            cp['categorias_topologicas'] = set()
+    
+    print("  - Change-points con evento topológico: {}/{} ({:.1f}%)".format(
         n_coincidencias, len(change_points), 100.0 * n_coincidencias / max(len(change_points), 1)))
-    return resultados
-
-
-# ============================================================================
-# FASE 7: ANÁLISIS DE RESIDUOS
-# ============================================================================
-def analizar_residuos(resultados_correlacion, serie_completa):
-    print("[FASE 7] Analizando residuos (contribución original)...")
-    rtt_dict = {ts: rtt for ts, rtt in serie_completa}
-    timestamps_ordenados = [ts for ts, _ in serie_completa]
-    residuos = []
-    for res in resultados_correlacion:
-        if not res['coincide']:
-            ts = res['timestamp']
-            try: idx = timestamps_ordenados.index(ts)
-            except ValueError: continue
-            if idx > 0 and idx < len(timestamps_ordenados):
-                rtt_antes = rtt_dict[timestamps_ordenados[idx - 1]]
-                rtt_despues = rtt_dict[timestamps_ordenados[idx]]
-                delta_rtt = rtt_despues - rtt_antes
-                pct_cambio = 100.0 * delta_rtt / max(rtt_antes, 0.001)
-            else:
-                rtt_antes = None; rtt_despues = rtt_dict.get(ts, 0); delta_rtt = 0.0; pct_cambio = 0.0
-            residuos.append({
-                'timestamp': ts, 'estado_anterior': res['estado_anterior'],
-                'estado_nuevo': res['estado_nuevo'], 'rtt_antes_ms': rtt_antes,
-                'rtt_despues_ms': rtt_despues, 'delta_rtt_ms': delta_rtt, 'pct_cambio': pct_cambio
-            })
-    print("  - Residuos identificados: {}".format(len(residuos)))
-    return residuos
+    
+    return change_points
 
 
 # ============================================================================
@@ -506,7 +625,7 @@ def analizar_residuos(resultados_correlacion, serie_completa):
 # ============================================================================
 def exportar_resultados(serie_completa, secuencias, estados_por_secuencia,
                         estados_suaves_por_secuencia, change_points,
-                        resultados_correlacion, residuos, output_dir,
+                        segmentos, metricas_calidad, output_dir,
                         measurement_id, probe_id,
                         longitudes=None, cambios_longitud=None,
                         tipo_fusion=None, mapa_fusion=None):
@@ -550,38 +669,32 @@ def exportar_resultados(serie_completa, secuencias, estados_por_secuencia,
                 writer.writerow([c['timestamp'], c['longitud_anterior'], c['longitud_nueva'], c['diferencia']])
         print("  - Cambios de longitud: {}".format(path_cambios))
     
-    # 3. Correlación
-    path_cp = os.path.join(output_dir, 'change_points_correlacion{}{}.csv'.format(ids_suffix, fusion_suffix))
+    # 3. Segmentos caracterizados
+    path_segmentos = os.path.join(output_dir, 'segmentos_caracterizados{}{}.csv'.format(ids_suffix, fusion_suffix))
+    with open(path_segmentos, 'w') as f:
+        writer = csv.writer(f)
+        writer.writerow(['seq_id', 'estado', 'start_ts', 'end_ts', 'n_ciclos', 'duracion_minutos',
+                        'media', 'mediana', 'std', 'min', 'max', 'tipo_degradacion'])
+        for seg in segmentos:
+            writer.writerow([seg['seq_id'], seg['estado'], seg['start_ts'], seg['end_ts'],
+                           seg['n_ciclos'], seg['duracion_minutos'],
+                           "{:.3f}".format(seg['media']), "{:.3f}".format(seg['mediana']),
+                           "{:.3f}".format(seg['std']), "{:.3f}".format(seg['min']),
+                           "{:.3f}".format(seg['max']), seg['tipo_degradacion']])
+    print("  - Segmentos caracterizados: {}".format(path_segmentos))
+    
+    # 4. Change-points con eventos topológicos
+    path_cp = os.path.join(output_dir, 'change_points_topologicos{}{}.csv'.format(ids_suffix, fusion_suffix))
     with open(path_cp, 'w') as f:
         writer = csv.writer(f)
-        writer.writerow(['timestamp', 'estado_anterior', 'estado_nuevo', 'categoria_path_analysis', 'categorias_en_ventana', 'coincide'])
-        for res in resultados_correlacion:
-            cats_str = "|".join("{}:{}".format(k, v) for k, v in res['categorias_en_ventana'].items())
-            writer.writerow([res['timestamp'], res['estado_anterior'], res['estado_nuevo'],
-                           res['categoria_path_analysis'] or 'NINGUNA', cats_str, res['coincide']])
-    print("  - Correlación: {}".format(path_cp))
-    
-    # 4. Residuos
-    path_res = os.path.join(output_dir, 'residuos_contribucion_original{}{}.csv'.format(ids_suffix, fusion_suffix))
-    with open(path_res, 'w') as f:
-        writer = csv.writer(f)
-        writer.writerow(['timestamp', 'estado_anterior', 'estado_nuevo', 'rtt_antes_ms', 'rtt_despues_ms', 'delta_rtt_ms', 'pct_cambio'])
-        for r in residuos:
-            writer.writerow([r['timestamp'], r['estado_anterior'], r['estado_nuevo'],
-                           "{:.3f}".format(r['rtt_antes_ms']) if r['rtt_antes_ms'] else '',
-                           "{:.3f}".format(r['rtt_despues_ms']), "{:.3f}".format(r['delta_rtt_ms']), "{:.2f}".format(r['pct_cambio'])])
-    print("  - Residuos: {}".format(path_res))
-    
-    # 5. Segmentos
-    path_eventos = os.path.join(output_dir, 'segmentos_hdphmm{}{}.csv'.format(ids_suffix, fusion_suffix))
-    with open(path_eventos, 'w') as f:
-        writer = csv.writer(f)
-        writer.writerow(['timestamp', 'categoria', 'estado_anterior', 'estado_nuevo'])
+        writer.writerow(['timestamp', 'estado_anterior', 'estado_nuevo', 'evento_topologico', 'categorias_topologicas'])
         for cp in change_points:
-            writer.writerow([cp['timestamp'], 'cambio_segmento_hdphmm', cp['estado_anterior'], cp['estado_nuevo']])
-    print("  - Eventos de segmento: {}".format(path_eventos))
+            cats_str = "|".join(cp['categorias_topologicas']) if cp['categorias_topologicas'] else 'NINGUNA'
+            writer.writerow([cp['timestamp'], cp['estado_anterior'], cp['estado_nuevo'],
+                           cp['evento_topologico'], cats_str])
+    print("  - Change-points topológicos: {}".format(path_cp))
     
-    # 6. Resumen
+    # 5. Resumen
     path_resumen = os.path.join(output_dir, 'resumen_ejecucion{}{}.txt'.format(ids_suffix, fusion_suffix))
     with open(path_resumen, 'w') as f:
         f.write("=" * 70 + "\nRESUMEN DE EJECUCIÓN HDP-HMM\n" + "=" * 70 + "\n\n")
@@ -610,11 +723,26 @@ def exportar_resultados(serie_completa, secuencias, estados_por_secuencia,
         n_estados = len(set(int(e) for arr in estados_por_secuencia for e in arr))
         f.write("Estados activos: {}\nChange-points detectados: {}\n".format(n_estados, len(change_points)))
         
-        f.write("\n--- CORRELACIÓN CON PATH ANALYSIS ---\n")
-        n_coinc = sum(1 for r in resultados_correlacion if r['coincide'])
-        f.write("Coincidencias: {}/{} ({:.1f}%)\n".format(n_coinc, len(resultados_correlacion), 100.0 * n_coinc / max(len(resultados_correlacion), 1)))
-        f.write("\n--- RESIDUOS (CONTRIBUCIÓN ORIGINAL) ---\nTotal residuos: {}\n\n".format(len(residuos)))
-        f.write("=" * 70 + "\n")
+        f.write("\n--- CARACTERIZACIÓN DE SEGMENTOS ---\n")
+        f.write("Total de segmentos: {}\n".format(len(segmentos)))
+        tipo_counts = defaultdict(int)
+        for seg in segmentos:
+            tipo_counts[seg['tipo_degradacion']] += 1
+        for tipo, count in sorted(tipo_counts.items(), key=lambda x: -x[1]):
+            f.write("  {}: {} segmentos\n".format(tipo, count))
+        
+        f.write("\n--- MÉTRICAS DE CALIDAD ---\n")
+        f.write("Varianza intra-segmento: {:.4f}\n".format(metricas_calidad['varianza_intra']))
+        f.write("Varianza inter-segmento: {:.4f}\n".format(metricas_calidad['varianza_inter']))
+        f.write("Ratio de calidad: {:.4f}\n".format(metricas_calidad['ratio_calidad']))
+        f.write("Duración media de segmentos: {:.2f} minutos\n".format(metricas_calidad['duracion_media_segmentos']))
+        
+        f.write("\n--- CAMBIOS TOPOLÓGICOS ---\n")
+        n_topo = sum(1 for cp in change_points if cp['evento_topologico'])
+        f.write("Change-points con evento topológico: {}/{} ({:.1f}%)\n".format(
+            n_topo, len(change_points), 100.0 * n_topo / max(len(change_points), 1)))
+        
+        f.write("\n" + "=" * 70 + "\n")
     print("  - Resumen: {}".format(path_resumen))
 
 
@@ -642,9 +770,8 @@ def main():
     # Flags de fusión
     parser.add_argument('--macro-estados', action='store_true', help='Fusionar estados manualmente (mapa por defecto o --mapa-macro)')
     parser.add_argument('--mapa-macro', type=str, default=None, help='Archivo CSV con mapa personalizado de macro-estados')
-    parser.add_argument('--fusion-auto', action='store_true', help='Fusionar estados automáticamente por criterio estadístico')
-    parser.add_argument('--umbral-media', type=float, default=2.0, help='Diferencia máxima de media para fusionar auto (ms, default: 2.0)')
-    parser.add_argument('--umbral-std', type=float, default=1.0, help='Diferencia máxima de std para fusionar auto (ms, default: 1.0)')
+    parser.add_argument('--fusion-auto', action='store_true', help='Fusionar estados automáticamente por Distancia de Bhattacharyya (Complete Linkage)')
+    parser.add_argument('--umbral-db', type=float, default=0.5, help='Distancia de Bhattacharyya máxima para fusionar (default: 0.5; rango típico 0.3-1.0)')
     
     args = parser.parse_args()
     
@@ -697,7 +824,7 @@ def main():
     if args.fusion_auto:
         todos_rtts = [rtt for seq in secuencias for (_, rtt) in seq]
         estados_trabajo, mapa_fusion = fusionar_estados_automatico(
-            estados_por_secuencia, todos_rtts, args.umbral_media, args.umbral_std)
+            estados_por_secuencia, todos_rtts, args.umbral_db)
         tipo_fusion = 'auto'
     elif args.macro_estados:
         mapa_fusion = cargar_mapa_macro_estados(args.mapa_macro)
@@ -714,12 +841,30 @@ def main():
     
     change_points = detectar_change_points(secuencias, estados_suaves_por_secuencia)
     dict_categorias_extendido = incorporar_cambios_longitud(cambios_longitud, dict_categorias)
-    resultados_correlacion = correlacionar_con_categorias(change_points, dict_categorias_extendido)
-    residuos = analizar_residuos(resultados_correlacion, serie)
     
+    # FASE 6: Caracterización de segmentos
+    segmentos = caracterizar_segmentos(serie, secuencias, estados_por_secuencia, estados_suaves_por_secuencia)
+    
+    # Calcular RTT normal (Percentil 25) para clasificación
+    rtts = [rtt for _, rtt in serie]
+    rtt_normal = np.percentile(rtts, 25)
+    print("  - RTT Normal (P25): {:.2f}ms".format(rtt_normal))
+    
+    # Clasificar tipo de degradación para cada segmento
+    for seg in segmentos:
+        seg['tipo_degradacion'] = clasificar_tipo_degradacion(seg, rtt_normal)
+    
+    # Calcular métricas de calidad
+    metricas_calidad = calcular_calidad_segmentacion(serie, segmentos)
+    print("  - Ratio de calidad: {:.2f}".format(metricas_calidad['ratio_calidad']))
+    
+    # FASE 7: Detección de cambios topológicos
+    change_points = detectar_cambios_topologicos(change_points, dict_categorias_extendido)
+    
+    # FASE 8: Exportación
     exportar_resultados(
         serie, secuencias, estados_por_secuencia, estados_suaves_por_secuencia,
-        change_points, resultados_correlacion, residuos, args.output_dir,
+        change_points, segmentos, metricas_calidad, args.output_dir,
         measurement_id, probe_id, longitudes=longitudes, cambios_longitud=cambios_longitud,
         tipo_fusion=tipo_fusion, mapa_fusion=mapa_fusion)
     
