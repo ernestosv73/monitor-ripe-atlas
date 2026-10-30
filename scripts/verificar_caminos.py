@@ -7,6 +7,8 @@ Integra las 3 comprobaciones y las cruza en una sola salida:
   1. Eventos del extractor (eventos_*.csv): ciclos con cambio_longitud / cambio_ip_asn y su solapamiento.
   2. Cambios de camino REALES (historial_*.csv): AS-path colapsado y longitud entre ciclos consecutivos.
   3. Tramos consecutivos con la misma longitud (sostenidos vs parpadeos).
+  + BLOQUES (tramos sostenidos de igual longitud unidos cuando los separan solo transitorios), tambien en
+    bloques_longitud_measurement<M>_probe<P>.csv (junto a tramos_longitud_...csv).
   + Cruce 1 x 2: cuantos eventos del extractor corresponden a un cambio de camino real.
   + LECTURA: conclusiones automaticas.
 
@@ -319,11 +321,14 @@ def main():
             seq.append([lg, i, i])
     sust_idx = [r for r in seq if r[2] - r[1] + 1 >= P]
     bloques = []
+    bloques_n = []   # cantidad de tramos sostenidos unidos en cada bloque (para el CSV)
     for r in sust_idx:
         if bloques and bloques[-1][0] == r[0]:
             bloques[-1][2] = r[2]
+            bloques_n[-1] += 1
         else:
             bloques.append(list(r))
+            bloques_n.append(1)
     dts = sorted((datetime.strptime(todos[i + 1], "%Y-%m-%d %H:%M:%S") -
                   datetime.strptime(todos[i], "%Y-%m-%d %H:%M:%S")).total_seconds() for i in range(len(todos) - 1))
     cad_s = dts[len(dts) // 2] if dts else 0.0
@@ -516,6 +521,18 @@ def main():
             wr.writerow([t, h, n, int(n >= P)])
     W("")
     W("Tramos exportados a: {0}".format(csvp))
+    # Bloques: los mismos que muestra la salida por consola, pero TODOS (la consola omite los de longitud modal si hay > 12)
+    csvb = os.path.join(a.output_dir, "bloques_longitud{0}.csv".format(suf0))
+    with open(csvb, "w", newline="") if sys.version_info[0] >= 3 else open(csvb, "wb") as fb:
+        wb = csv.writer(fb)
+        wb.writerow(["bloque_id", "longitud", "inicio", "fin", "duracion_h", "ciclos", "fuera",
+                     "tramos_sostenidos", "longitud_modal"])
+        for k_, (lg, i0, i1) in enumerate(bloques):
+            n_ = i1 - i0 + 1
+            fuera_ = sum(1 for i in range(i0, i1 + 1) if firma[tss[i]][0] != lg)
+            wb.writerow([k_ + 1, lg, tss[i0], tss[i1], "{0:.1f}".format(n_ * cad_s / 3600.0), n_, fuera_,
+                         bloques_n[k_], int(lg == modal_b)])
+    W("Bloques exportados a: {0}".format(csvb))
     if not a.sin_html:
         htmlp = os.path.join(a.output_dir, "caminos{0}.html".format(suf0))
         datos = datos_visor(mid, pid, cad_s, todos, ciclos, ips, rtts, alcanzados, info_dest,
