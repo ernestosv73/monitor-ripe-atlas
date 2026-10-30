@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """
 =============================================================================
-HDP-HMM con bnpy para Segmentación de Latencia en RIPE Atlas (v4)
-+ Análisis por BLOQUES (Agregación de tramos de igual longitud)
+HDP-HMM con bnpy para Segmentación de Latencia en RIPE Atlas (v5)
++ Análisis por BLOQUES (Lectura directa de CSV de bloques)
 + Caracterización de Segmentos y Detección de Cambios Topológicos
 + Fusión de Estados (Automática por Bhattacharyya)
 =============================================================================
@@ -122,54 +122,26 @@ def cargar_csv_crudo(input_path, dest_hop=None):
     return serie, longitudes, cambios_longitud
 
 
-def generar_bloques_desde_tramos(tramos_path):
+def cargar_bloques_desde_csv(bloques_path):
     """
-    Lee el CSV de tramos y agrega los consecutivos de la misma longitud en Bloques,
-    ignorando los tramos transitorios (sostenido=0) que los separan.
+    Lee directamente el CSV de bloques generado por verificar_caminos.py.
+    Estructura esperada: bloque_id,longitud,inicio,fin,duracion_h,ciclos,fuera,tramos_sostenidos,longitud_modal
     """
-    print("[FASE 1b] Generando bloques a partir de tramos: {}".format(tramos_path))
-    df = pd.read_csv(tramos_path)
+    print("[FASE 1b] Cargando bloques desde: {}".format(bloques_path))
+    df = pd.read_csv(bloques_path)
     
     bloques = []
-    current_bloque = None
-    
     for idx, row in df.iterrows():
-        lon = int(row['longitud'])
-        ciclos = int(row['ciclos'])
-        inicio = str(row['inicio'])
-        sostenido = int(row['sostenido'])
+        bloques.append({
+            'bloque_id': int(row['bloque_id']),
+            'longitud': int(row['longitud']),
+            'inicio': str(row['inicio']),
+            'fin': str(row['fin']),
+            'ciclos': int(row['ciclos']),
+            'tramos_sostenidos': int(row['tramos_sostenidos'])
+        })
         
-        if current_bloque is None:
-            current_bloque = {
-                'longitud': lon,
-                'inicio': inicio,
-                'ciclos': ciclos,
-                'tramos_sostenidos': 1 if sostenido == 1 else 0
-            }
-        elif lon == current_bloque['longitud']:
-            # Misma longitud: acumular ciclos
-            current_bloque['ciclos'] += ciclos
-            if sostenido == 1:
-                current_bloque['tramos_sostenidos'] += 1
-        else:
-            # Cambio de longitud: guardar bloque anterior si tiene al menos 1 tramo sostenido
-            if current_bloque['tramos_sostenidos'] > 0:
-                bloques.append(current_bloque)
-            # Iniciar nuevo bloque
-            current_bloque = {
-                'longitud': lon,
-                'inicio': inicio,
-                'ciclos': ciclos,
-                'tramos_sostenidos': 1 if sostenido == 1 else 0
-            }
-            
-    # No olvidar el último bloque
-    if current_bloque is not None and current_bloque['tramos_sostenidos'] > 0:
-        bloques.append(current_bloque)
-        
-    print("  - Tramos totales procesados: {}".format(len(df)))
-    print("  - Bloques coherentes generados: {}".format(len(bloques)))
-    
+    print("  - Bloques coherentes cargados: {}".format(len(bloques)))
     return bloques
 
 
@@ -458,7 +430,7 @@ def _procesar_segmento(serie_completa, seq, start_idx, end_idx, seq_id, estado):
     }
 
 def calcular_calidad_segmentacion(serie_completa, segmentos):
-    rtts = [rtt for _, rtt, _ in serie_completa]  # CORREGIDO
+    rtts = [rtt for _, rtt, _ in serie_completa]
     media_global = np.mean(rtts)
     n_total = len(rtts)
     
@@ -552,7 +524,6 @@ def exportar_resultados(serie_completa, secuencias, estados_por_secuencia, estad
         f.write("Fecha: {}\nDataset: {} puntos temporales\n".format(datetime.now().strftime("%Y-%m-%d %H:%M:%S"), len(serie_completa)))
         f.write("Rango temporal: {} a {}\nTipo de fusión: {}\n\n".format(serie_completa[0][0], serie_completa[-1][0], tipo_fusion or 'Ninguna'))
         
-        # CORRECCIÓN: desempaquetar 3 valores (_, rtt, _)
         rtts = [rtt for _, rtt, _ in serie_completa]
         f.write("--- ESTADÍSTICAS DE RTT ---\nMin: {:.2f} ms\nMax: {:.2f} ms\nMedia: {:.2f} ms\nDesv. Est.: {:.2f} ms\n\n".format(
             min(rtts), max(rtts), np.mean(rtts), np.std(rtts)))
@@ -584,7 +555,7 @@ def main():
     parser = argparse.ArgumentParser(description="HDP-HMM con bnpy para segmentación de latencia en RIPE Atlas")
     parser.add_argument('--crudo', required=True, help='CSV crudo de traceroute')
     parser.add_argument('--categorias', required=True, help='CSV de categorías Path Analysis')
-    parser.add_argument('--tramos-csv', required=True, help='CSV de tramos generado por verificar_caminos.py')
+    parser.add_argument('--bloques-csv', required=True, help='CSV de bloques generado por verificar_caminos.py')
     parser.add_argument('--output-dir', default='resultados_hdphmm', help='Directorio de salida')
     parser.add_argument('--dest-hop', type=int, default=None, help='Hop fijo de destino')
     parser.add_argument('--gap-minutes', type=float, default=90.0, help='Hueco temporal (min)')
@@ -607,7 +578,7 @@ def main():
     args = parser.parse_args()
     
     print("=" * 70)
-    print("HDP-HMM con bnpy para Segmentación de Latencia en RIPE Atlas (v4 - Bloques)")
+    print("HDP-HMM con bnpy para Segmentación de Latencia en RIPE Atlas (v5 - Bloques CSV)")
     print("=" * 70)
     print("Python: {}".format(sys.version))
     print("NumPy: {}".format(np.__version__))
@@ -619,7 +590,7 @@ def main():
     print("=" * 70)
     
     serie_completa, longitudes, cambios_longitud = cargar_csv_crudo(args.crudo, dest_hop=args.dest_hop)
-    bloques = generar_bloques_desde_tramos(args.tramos_csv)
+    bloques = cargar_bloques_desde_csv(args.bloques_csv)
     dict_categorias = cargar_categorias(args.categorias)
     
     if not serie_completa or not bloques:
@@ -634,15 +605,30 @@ def main():
     secuencias_global = []
     
     for idx, bloque in enumerate(bloques):
-        print("\n  [BLOQUE {}/{}] Longitud: {} hops, Ciclos totales: {}".format(
-            idx + 1, len(bloques), bloque['longitud'], bloque['ciclos']))
+        print("\n  [BLOQUE {}/{}] ID: {}, Longitud: {} hops, Ciclos totales: {}".format(
+            idx + 1, len(bloques), bloque['bloque_id'], bloque['longitud'], bloque['ciclos']))
         
         sub_serie = extraer_sub_serie(serie_completa, bloque)
         if len(sub_serie) < 10:
             print("    → Bloque demasiado pequeño, omitido.")
             continue
         
+        # >>> PRE-FILTRADO DE OUTLIERS (Percentil 99) <<<
+        # Se filtran los valores extremos para cumplir el supuesto Gaussiano del HDP-HMM
+        rtts_bloque = [rtt for _, rtt in sub_serie]
+        umbral_p99 = np.percentile(rtts_bloque, 99.0)
+        sub_serie_filtrada = [(ts, rtt) for ts, rtt in sub_serie if rtt <= umbral_p99]
+        n_filtrados = len(sub_serie) - len(sub_serie_filtrada)
+        print("    → Outliers filtrados (RTT > P99={:.2f}ms): {}".format(umbral_p99, n_filtrados))
+        sub_serie = sub_serie_filtrada
+        
+        if len(sub_serie) < 10:
+            print("    → Bloque demasiado pequeño tras filtrar outliers, omitido.")
+            continue
+
         print("    → Ciclos extraídos para análisis: {}".format(len(sub_serie)))
+        
+        # Cortar en secuencias por huecos temporales dentro del bloque
         
         # Cortar en secuencias por huecos temporales dentro del bloque
         secuencias = cortar_en_secuencias(sub_serie, args.gap_minutes)
@@ -691,8 +677,8 @@ def main():
         estados_suaves_por_secuencia_global.extend(estados_suaves)
         secuencias_global.extend(secuencias)
     
-        # Calcular RTT normal y clasificar segmentos
-    rtts = [rtt for _, rtt, _ in serie_completa]  # CORREGIDO: agregar _ para longitud
+    # Calcular RTT normal y clasificar segmentos
+    rtts = [rtt for _, rtt, _ in serie_completa]
     rtt_normal = np.percentile(rtts, 25)
     print("\n  - RTT Normal (P25 global): {:.2f}ms".format(rtt_normal))
     
