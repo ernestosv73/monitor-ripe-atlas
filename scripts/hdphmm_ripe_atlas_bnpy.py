@@ -5,6 +5,7 @@ HDP-HMM con bnpy para Segmentación de Latencia en RIPE Atlas (v5)
 + Análisis por BLOQUES (Lectura directa de CSV de bloques)
 + Caracterización de Segmentos y Detección de Cambios Topológicos
 + Fusión de Estados (Automática por Bhattacharyya)
++ Agrupamiento de Segmentos Consecutivos por Tipo de Degradación
 =============================================================================
 Basado en: Mouchet et al., "Large-Scale Characterization and Segmentation of
            Internet Path Delays with Infinite HMMs" (arXiv:1910.12714)
@@ -478,6 +479,75 @@ def detectar_cambios_topologicos(change_points, dict_categorias):
 
 
 # ============================================================================
+# FASE 5b: AGRUPAMIENTO DE SEGMENTOS CONSECUTIVOS
+# ============================================================================
+def agrupar_segmentos_consecutivos(segmentos):
+    """
+    Agrupa segmentos consecutivos que comparten el mismo 'tipo_degradacion',
+    manteniendo la continuidad temporal y calculando estadísticas agregadas.
+    
+    Fórmulas aplicadas:
+    - Media: Media ponderada por n_ciclos
+    - Std: Desviación estándar agrupada (Pooled Std Dev)
+      σ_pooled = sqrt( (Σ(n_i * (σ_i² + μ_i²)) / N) - μ_global² )
+    - Mediana: Proxy = mediana del segmento con mayor n_ciclos
+    - Min/Max: Valores extremos absolutos del grupo
+    """
+    if not segmentos:
+        return []
+    
+    grupos_raw = []
+    current_group = []
+    
+    for seg in segmentos:
+        if not current_group or current_group[-1]['tipo_degradacion'] == seg['tipo_degradacion']:
+            current_group.append(seg)
+        else:
+            grupos_raw.append(current_group)
+            current_group = [seg]
+    if current_group:
+        grupos_raw.append(current_group)
+        
+    grupos_finales = []
+    for idx, group in enumerate(grupos_raw):
+        total_n = sum(s['n_ciclos'] for s in group)
+        total_dur = sum(s['duracion_minutos'] for s in group)
+        
+        # Media ponderada por cantidad de ciclos
+        weighted_mean = sum(s['media'] * s['n_ciclos'] for s in group) / total_n
+        
+        # Desviación estándar agrupada (Pooled Std Dev)
+        # Fórmula: sqrt( (Σ(n_i * (σ_i² + μ_i²)) / N) - μ_global² )
+        sum_sq = sum(s['n_ciclos'] * (s['std']**2 + s['media']**2) for s in group)
+        pooled_var = (sum_sq / total_n) - (weighted_mean**2)
+        pooled_std = np.sqrt(max(0, pooled_var)) # max(0) para evitar errores de precisión flotante
+        
+        # Min y Max globales del grupo
+        min_val = min(s['min'] for s in group)
+        max_val = max(s['max'] for s in group)
+        
+        # Mediana proxy: usamos la mediana del segmento con mayor peso (más ciclos)
+        median_proxy = max(group, key=lambda s: s['n_ciclos'])['mediana']
+        
+        grupos_finales.append({
+            'grupo_id': idx + 1,
+            'start_ts': group[0]['start_ts'],
+            'end_ts': group[-1]['end_ts'],
+            'n_ciclos': total_n,
+            'duracion_minutos': total_dur,
+            'media': weighted_mean,
+            'mediana': median_proxy,
+            'std': pooled_std,
+            'min': min_val,
+            'max': max_val,
+            'tipo_degradacion': group[0]['tipo_degradacion'],
+            'n_segmentos_originales': len(group)
+        })
+        
+    return grupos_finales
+
+
+# ============================================================================
 # FASE 6: EXPORTACIÓN
 # ============================================================================
 def exportar_resultados(serie_completa, secuencias, estados_por_secuencia, estados_suaves_por_secuencia,
@@ -498,7 +568,8 @@ def exportar_resultados(serie_completa, secuencias, estados_por_secuencia, estad
                 writer.writerow([ts, "{:.3f}".format(rtt), seq_id, int(e_crudo), int(e_suave)])
     
     # 2. Segmentos caracterizados
-    with open(os.path.join(output_dir, 'segmentos_caracterizados{}{}.csv'.format(ids_suffix, fusion_suffix)), 'w') as f:
+    path_segmentos = os.path.join(output_dir, 'segmentos_caracterizados{}{}.csv'.format(ids_suffix, fusion_suffix))
+    with open(path_segmentos, 'w') as f:
         writer = csv.writer(f)
         writer.writerow(['seq_id', 'estado', 'start_ts', 'end_ts', 'n_ciclos', 'duracion_minutos',
                         'media', 'mediana', 'std', 'min', 'max', 'tipo_degradacion'])
@@ -507,6 +578,23 @@ def exportar_resultados(serie_completa, secuencias, estados_por_secuencia, estad
                            seg['n_ciclos'], seg['duracion_minutos'], "{:.3f}".format(seg['media']),
                            "{:.3f}".format(seg['mediana']), "{:.3f}".format(seg['std']),
                            "{:.3f}".format(seg['min']), "{:.3f}".format(seg['max']), seg['tipo_degradacion']])
+    print("  - Segmentos caracterizados: {}".format(path_segmentos))
+    
+    # 2b. Segmentos caracterizados AGRUPADOS
+    segmentos_agrupados = agrupar_segmentos_consecutivos(segmentos)
+    path_agrupados = os.path.join(output_dir, 'segmentos_caracterizados_agrupados{}{}.csv'.format(ids_suffix, fusion_suffix))
+    with open(path_agrupados, 'w') as f:
+        writer = csv.writer(f)
+        writer.writerow(['grupo_id', 'start_ts', 'end_ts', 'n_ciclos', 'duracion_minutos',
+                        'media', 'mediana', 'std', 'min', 'max', 'tipo_degradacion', 'n_segmentos_originales'])
+        for grp in segmentos_agrupados:
+            writer.writerow([grp['grupo_id'], grp['start_ts'], grp['end_ts'],
+                           grp['n_ciclos'], grp['duracion_minutos'], 
+                           "{:.3f}".format(grp['media']), "{:.3f}".format(grp['mediana']),
+                           "{:.3f}".format(grp['std']), "{:.3f}".format(grp['min']),
+                           "{:.3f}".format(grp['max']), grp['tipo_degradacion'], 
+                           grp['n_segmentos_originales']])
+    print("  - Segmentos agrupados: {} ({} grupos)".format(path_agrupados, len(segmentos_agrupados)))
     
     # 3. Change-points topológicos
     with open(os.path.join(output_dir, 'change_points_topologicos{}{}.csv'.format(ids_suffix, fusion_suffix)), 'w') as f:
@@ -531,11 +619,22 @@ def exportar_resultados(serie_completa, secuencias, estados_por_secuencia, estad
         f.write("--- MODELO HDP-HMM ---\nEstados activos: {}\nChange-points detectados: {}\n\n".format(
             len(set(int(e) for arr in estados_por_secuencia for e in arr)), len(change_points)))
         
-        f.write("--- CARACTERIZACIÓN DE SEGMENTOS ---\nTotal de segmentos: {}\n".format(len(segmentos)))
+        f.write("--- CARACTERIZACIÓN DE SEGMENTOS ---\n")
+        f.write("Total de segmentos originales: {}\n".format(len(segmentos)))
+        f.write("Total de grupos agrupados: {}\n".format(len(segmentos_agrupados)))
+        f.write("Reducción: {:.1f}%\n\n".format(100.0 * (1 - len(segmentos_agrupados) / max(len(segmentos), 1))))
+        
         tipo_counts = defaultdict(int)
         for seg in segmentos: tipo_counts[seg['tipo_degradacion']] += 1
+        f.write("Distribución de segmentos originales:\n")
         for tipo, count in sorted(tipo_counts.items(), key=lambda x: -x[1]):
             f.write("  {}: {} segmentos\n".format(tipo, count))
+        
+        tipo_counts_agrup = defaultdict(int)
+        for grp in segmentos_agrupados: tipo_counts_agrup[grp['tipo_degradacion']] += 1
+        f.write("\nDistribución de grupos agrupados:\n")
+        for tipo, count in sorted(tipo_counts_agrup.items(), key=lambda x: -x[1]):
+            f.write("  {}: {} grupos\n".format(tipo, count))
         
         f.write("\n--- MÉTRICAS DE CALIDAD ---\nVarianza intra-segmento: {:.4f}\nVarianza inter-segmento: {:.4f}\n".format(
             metricas_calidad['varianza_intra'], metricas_calidad['varianza_inter']))
@@ -627,8 +726,6 @@ def main():
             continue
 
         print("    → Ciclos extraídos para análisis: {}".format(len(sub_serie)))
-        
-        # Cortar en secuencias por huecos temporales dentro del bloque
         
         # Cortar en secuencias por huecos temporales dentro del bloque
         secuencias = cortar_en_secuencias(sub_serie, args.gap_minutes)
