@@ -9,6 +9,8 @@ Integra las 3 comprobaciones y las cruza en una sola salida:
   3. Tramos consecutivos con la misma longitud (sostenidos vs parpadeos).
   + BLOQUES (tramos sostenidos de igual longitud unidos cuando los separan solo transitorios), tambien en
     bloques_longitud_measurement<M>_probe<P>.csv (junto a tramos_longitud_...csv).
+  + CICLOS EXCLUIDOS (destino no alcanzado) en ciclos_excluidos_measurement<M>_probe<P>.csv: todos los ciclos de la
+    seccion DESTINO NO ALCANZADO, con el tramo (y bloque) al que corresponden.
   + Cruce 1 x 2: cuantos eventos del extractor corresponden a un cambio de camino real.
   + LECTURA: conclusiones automaticas.
 
@@ -458,7 +460,7 @@ def main():
             W("  {0:<20}{1:>5}  {2:<30}{3:<9}{4:>10}{5}".format(
                 t, k, ip, asn or "-", "n/d" if r is None else "{0:.1f}".format(r), "  [PRIVADA]" if es_privada(ip) else ""))
         if len(no_alc) > 40:
-            W("  ... ({0} ciclos mas)".format(len(no_alc) - 40))
+            W("  ... ({0} ciclos mas; todos en ciclos_excluidos_*.csv)".format(len(no_alc) - 40))
         W("  Un ultimo salto privado (RFC1918) es la red local del probe: perdida de conectividad, no un cambio de ruta.")
         W("  Revisar si el ciclo siguiente cambia de camino (recambio de ruta con perdida durante la convergencia).")
 
@@ -533,6 +535,53 @@ def main():
             wb.writerow([k_ + 1, lg, tss[i0], tss[i1], "{0:.1f}".format(n_ * cad_s / 3600.0), n_, fuera_,
                          bloques_n[k_], int(lg == modal_b)])
     W("Bloques exportados a: {0}".format(csvb))
+    # Ciclos excluidos (destino no alcanzado): los mismos de la seccion DESTINO NO ALCANZADO, TODOS (la consola muestra 40),
+    # mas el tramo al que corresponden. 'tramo_n' es la posicion (1..N) del tramo en tramos_longitud_*.csv y
+    # 'tramo_inicio' su columna 'inicio'. Un ciclo excluido no pertenece a ningun tramo (los tramos se arman solo con
+    # ciclos que llegaron al destino): se le asigna el tramo que interrumpe, es decir el de los ciclos que lo rodean.
+    # Si el anterior y el siguiente son de tramos distintos (cae justo en una frontera), se asigna el anterior,
+    # 'entre_tramos' = 1 y 'tramo_siguiente_n' indica el otro.
+    import bisect
+    run_de = []          # posicion en tss -> indice (0-based) del tramo
+    for k_, r_ in enumerate(runs):
+        run_de.extend([k_] * r_[1])
+    bloque_de = {}       # posicion en tss -> bloque_id (1-based, como en bloques_longitud_*.csv)
+    for k_, (lg_, i0_, i1_) in enumerate(bloques):
+        for i_ in range(i0_, i1_ + 1):
+            bloque_de[i_] = k_ + 1
+    csve = os.path.join(a.output_dir, "ciclos_excluidos{0}.csv".format(suf0))
+    with open(csve, "w", newline="") if sys.version_info[0] >= 3 else open(csve, "wb") as fe:
+        we = csv.writer(fe)
+        we.writerow(["ciclo", "salto", "ultimo_salto_ip", "asn", "rtt_ms", "privada",
+                     "tramo_n", "tramo_inicio", "tramo_longitud", "tramo_sostenido", "misma_longitud_que_tramo",
+                     "entre_tramos", "tramo_siguiente_n", "bloque_id"])
+        for t in no_alc:
+            k, ip, asn = ult[t]
+            r = rtts[t].get(k)
+            pos = bisect.bisect_left(tss, t)          # primer ciclo con destino posterior a t
+            prev_i, next_i = pos - 1, pos
+            tiene_prev, tiene_next = prev_i >= 0, next_i < len(tss)
+            if not tiene_prev and not tiene_next:
+                tr_i, entre, sig = None, 0, None
+            elif not tiene_prev:
+                tr_i, entre, sig = run_de[next_i], 0, None
+            elif not tiene_next:
+                tr_i, entre, sig = run_de[prev_i], 0, None
+            elif run_de[prev_i] == run_de[next_i]:
+                tr_i, entre, sig = run_de[prev_i], 0, None
+            else:
+                tr_i, entre, sig = run_de[prev_i], 1, run_de[next_i] + 1
+            bl = bloque_de.get(prev_i) if tiene_prev else None
+            if tiene_next and bloque_de.get(next_i) != bl:
+                bl = None if tiene_prev else bloque_de.get(next_i)
+            if tr_i is None:
+                fila_tr = ["", "", "", "", ""]
+            else:
+                h_, n_, t0_ = runs[tr_i]
+                fila_tr = [tr_i + 1, t0_, h_, int(n_ >= P), int(k == h_)]
+            we.writerow([t, k, ip, asn, "" if r is None else "{0:.3f}".format(r), int(es_privada(ip))]
+                        + fila_tr + [entre, "" if sig is None else sig, "" if bl is None else bl])
+    W("Ciclos excluidos exportados a: {0}  ({1} ciclos)".format(csve, len(no_alc)))
     if not a.sin_html:
         htmlp = os.path.join(a.output_dir, "caminos{0}.html".format(suf0))
         datos = datos_visor(mid, pid, cad_s, todos, ciclos, ips, rtts, alcanzados, info_dest,
