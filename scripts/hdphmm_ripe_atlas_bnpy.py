@@ -1,8 +1,10 @@
 # -*- coding: utf-8 -*-
 """
 =============================================================================
-HDP-HMM con bnpy para Segmentación de Latencia en RIPE Atlas (v5)
+HDP-HMM con bnpy para Segmentación de Latencia en RIPE Atlas (v5.1)
 + Análisis por BLOQUES (Lectura directa de CSV de bloques)
++ Intervalo de medición configurable (reemplaza hardcode de 10 min)
++ Exclusión de ciclos que no alcanzan el destino (ciclos_excluidos CSV)
 + Caracterización de Segmentos y Detección de Cambios Topológicos
 + Fusión de Estados (Automática por Bhattacharyya)
 + Agrupamiento de Segmentos Consecutivos por Tipo de Degradación
@@ -146,11 +148,43 @@ def cargar_bloques_desde_csv(bloques_path):
     return bloques
 
 
-def extraer_sub_serie(serie_completa, bloque):
+def cargar_ciclos_excluidos(ciclos_excluidos_path):
+    """
+    Carga el CSV de ciclos excluidos generado por verificar_caminos.py.
+    Retorna un set de timestamps que deben ser excluidos del análisis.
+    
+    Estructura esperada: ciclo,salto,ultimo_salto_ip,asn,rtt_ms,privada,...
+    """
+    if not ciclos_excluidos_path or not os.path.exists(ciclos_excluidos_path):
+        print("[FASE 1c] No se proporcionó archivo de ciclos excluidos (o no existe). Se incluirán todos los ciclos.")
+        return set()
+    
+    print("[FASE 1c] Cargando ciclos excluidos desde: {}".format(ciclos_excluidos_path))
+    ciclos_excluidos = set()
+    
+    with open(ciclos_excluidos_path, 'r') as f:
+        reader = csv.DictReader(f)
+        n_lineas = 0
+        for row in reader:
+            n_lineas += 1
+            ts = row['ciclo'].strip()
+            if ts:
+                ciclos_excluidos.add(ts)
+    
+    print("  - Ciclos excluidos cargados: {} (de {} líneas)".format(len(ciclos_excluidos), n_lineas))
+    return ciclos_excluidos
+
+
+def extraer_sub_serie(serie_completa, bloque, ciclos_excluidos=None):
     """
     Extrae los ciclos del bloque buscando su timestamp de inicio y tomando 
-    una ventana del tamaño de 'ciclos', filtrando solo la longitud del bloque.
+    una ventana del tamaño de 'ciclos', filtrando:
+    1. Solo la longitud del bloque (el target real)
+    2. Excluyendo los ciclos que no alcanzaron el destino (ciclos_excluidos)
     """
+    if ciclos_excluidos is None:
+        ciclos_excluidos = set()
+    
     inicio_str = bloque['inicio']
     longitud = bloque['longitud']
     ciclos_esperados = bloque['ciclos']
@@ -168,14 +202,19 @@ def extraer_sub_serie(serie_completa, bloque):
     end_idx = min(start_idx + ciclos_esperados, len(serie_completa))
     window = serie_completa[start_idx:end_idx]
     
-    # Filtrar solo las mediciones que coinciden con la longitud del bloque (el target real)
-    sub_serie = [(ts, rtt) for ts, rtt, lon in window if lon == longitud]
+    # Filtrar: solo mediciones que coinciden con la longitud del bloque Y no están excluidas
+    sub_serie = [(ts, rtt) for ts, rtt, lon in window 
+                 if lon == longitud and ts not in ciclos_excluidos]
+    
+    n_excluidos_en_bloque = sum(1 for ts, rtt, lon in window if ts in ciclos_excluidos)
+    if n_excluidos_en_bloque > 0:
+        print("    → Ciclos excluidos dentro del bloque: {}".format(n_excluidos_en_bloque))
     
     return sub_serie
 
 
 def cargar_categorias(path_csv):
-    print("[FASE 1c] Cargando categorías Path Analysis (solo cambios topológicos): {}".format(path_csv))
+    print("[FASE 1d] Cargando categorías Path Analysis (solo cambios topológicos): {}".format(path_csv))
     dict_categorias = defaultdict(lambda: {'categorias': set(), 'conteo': 0})
     
     with open(path_csv, 'r') as f:
@@ -403,7 +442,11 @@ def detectar_change_points(secuencias, estados_por_secuencia):
     return change_points
 
 
-def caracterizar_segmentos(serie_completa, secuencias, estados_por_secuencia, estados_suaves_por_secuencia):
+def caracterizar_segmentos(serie_completa, secuencias, estados_por_secuencia, estados_suaves_por_secuencia, interval_minutes):
+    """
+    Caracteriza cada segmento con estadísticas completas.
+    interval_minutes: duración de cada ciclo en minutos (interval_segundos / 60)
+    """
     segmentos = []
     for seq_id, (seq, estados_suaves) in enumerate(zip(secuencias, estados_suaves_por_secuencia)):
         start_idx = 0
@@ -411,24 +454,31 @@ def caracterizar_segmentos(serie_completa, secuencias, estados_por_secuencia, es
         
         for i in range(1, len(estados_suaves)):
             if estados_suaves[i] != estado_actual:
-                segmentos.append(_procesar_segmento(serie_completa, seq, start_idx, i - 1, seq_id, int(estado_actual)))
+                segmentos.append(_procesar_segmento(serie_completa, seq, start_idx, i - 1, seq_id, int(estado_actual), interval_minutes))
                 start_idx = i
                 estado_actual = estados_suaves[i]
         
-        segmentos.append(_procesar_segmento(serie_completa, seq, start_idx, len(estados_suaves) - 1, seq_id, int(estado_actual)))
+        segmentos.append(_procesar_segmento(serie_completa, seq, start_idx, len(estados_suaves) - 1, seq_id, int(estado_actual), interval_minutes))
     
     return segmentos
 
-def _procesar_segmento(serie_completa, seq, start_idx, end_idx, seq_id, estado):
+
+def _procesar_segmento(serie_completa, seq, start_idx, end_idx, seq_id, estado, interval_minutes):
+    """
+    Procesa un segmento calculando sus estadísticas.
+    interval_minutes: duración de cada ciclo en minutos (calculado desde --interval)
+    """
     rtts_seg = [serie_completa[idx][1] for idx in range(start_idx, end_idx + 1)]
+    n_ciclos = end_idx - start_idx + 1
     return {
         'seq_id': seq_id, 'estado': estado,
         'start_ts': seq[start_idx][0], 'end_ts': seq[end_idx][0],
-        'n_ciclos': end_idx - start_idx + 1,
-        'duracion_minutos': (end_idx - start_idx + 1) * 10,
+        'n_ciclos': n_ciclos,
+        'duracion_minutos': n_ciclos * interval_minutes,
         'media': float(np.mean(rtts_seg)), 'mediana': float(np.median(rtts_seg)),
         'std': float(np.std(rtts_seg)), 'min': float(np.min(rtts_seg)), 'max': float(np.max(rtts_seg))
     }
+
 
 def calcular_calidad_segmentacion(serie_completa, segmentos):
     rtts = [rtt for _, rtt, _ in serie_completa]
@@ -445,7 +495,12 @@ def calcular_calidad_segmentacion(serie_completa, segmentos):
         'n_segmentos': len(segmentos)
     }
 
+
 def clasificar_tipo_degradacion(segmento, rtt_normal):
+    """
+    Clasifica un segmento según su tipo de degradación.
+    Los umbrales de duración (60, 30, 10 minutos) son absolutos e independientes del interval.
+    """
     desviacion = segmento['media'] - rtt_normal
     duracion = segmento['duracion_minutos']
     
@@ -517,16 +572,12 @@ def agrupar_segmentos_consecutivos(segmentos):
         weighted_mean = sum(s['media'] * s['n_ciclos'] for s in group) / total_n
         
         # Desviación estándar agrupada (Pooled Std Dev)
-        # Fórmula: sqrt( (Σ(n_i * (σ_i² + μ_i²)) / N) - μ_global² )
         sum_sq = sum(s['n_ciclos'] * (s['std']**2 + s['media']**2) for s in group)
         pooled_var = (sum_sq / total_n) - (weighted_mean**2)
-        pooled_std = np.sqrt(max(0, pooled_var)) # max(0) para evitar errores de precisión flotante
+        pooled_std = np.sqrt(max(0, pooled_var))
         
-        # Min y Max globales del grupo
         min_val = min(s['min'] for s in group)
         max_val = max(s['max'] for s in group)
-        
-        # Mediana proxy: usamos la mediana del segmento con mayor peso (más ciclos)
         median_proxy = max(group, key=lambda s: s['n_ciclos'])['mediana']
         
         grupos_finales.append({
@@ -552,7 +603,8 @@ def agrupar_segmentos_consecutivos(segmentos):
 # ============================================================================
 def exportar_resultados(serie_completa, secuencias, estados_por_secuencia, estados_suaves_por_secuencia,
                         change_points, segmentos, metricas_calidad, output_dir, measurement_id, probe_id,
-                        longitudes=None, cambios_longitud=None, tipo_fusion=None, mapa_fusion=None):
+                        longitudes=None, cambios_longitud=None, tipo_fusion=None, mapa_fusion=None,
+                        interval_segundos=None):
     print("[FASE 6] Exportando resultados a: {}".format(output_dir))
     if not os.path.exists(output_dir): os.makedirs(output_dir)
     
@@ -609,7 +661,10 @@ def exportar_resultados(serie_completa, secuencias, estados_por_secuencia, estad
         f.write("=" * 70 + "\nRESUMEN DE EJECUCIÓN HDP-HMM (ANÁLISIS POR BLOQUES)\n" + "=" * 70 + "\n\n")
         if measurement_id and probe_id:
             f.write("Measurement ID: {}\nProbe ID: {}\n\n".format(measurement_id, probe_id))
-        f.write("Fecha: {}\nDataset: {} puntos temporales\n".format(datetime.now().strftime("%Y-%m-%d %H:%M:%S"), len(serie_completa)))
+        f.write("Fecha: {}\n".format(datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+        if interval_segundos is not None:
+            f.write("Intervalo de medición: {} segundos ({} min/ciclo)\n".format(interval_segundos, interval_segundos / 60.0))
+        f.write("Dataset: {} puntos temporales\n".format(len(serie_completa)))
         f.write("Rango temporal: {} a {}\nTipo de fusión: {}\n\n".format(serie_completa[0][0], serie_completa[-1][0], tipo_fusion or 'Ninguna'))
         
         rtts = [rtt for _, rtt, _ in serie_completa]
@@ -655,9 +710,16 @@ def main():
     parser.add_argument('--crudo', required=True, help='CSV crudo de traceroute')
     parser.add_argument('--categorias', required=True, help='CSV de categorías Path Analysis')
     parser.add_argument('--bloques-csv', required=True, help='CSV de bloques generado por verificar_caminos.py')
+    parser.add_argument('--ciclos-excluidos', type=str, default=None, 
+                       help='CSV de ciclos excluidos (no alcanzaron destino) generado por verificar_caminos.py')
     parser.add_argument('--output-dir', default='resultados_hdphmm', help='Directorio de salida')
     parser.add_argument('--dest-hop', type=int, default=None, help='Hop fijo de destino')
     parser.add_argument('--gap-minutes', type=float, default=90.0, help='Hueco temporal (min)')
+    
+    # NUEVO: Intervalo de medición de la sonda (en segundos)
+    parser.add_argument('--interval', type=int, default=900, 
+                       help='Intervalo de medición de la sonda en segundos (default: 900 = 15 min)')
+    
     parser.add_argument('--K', type=int, default=15, help='Truncamiento de estados')
     parser.add_argument('--nlap', type=int, default=100, help='Pasadas de entrenamiento')
     parser.add_argument('--trans-alpha', type=float, default=0.5, help='Concentración transiciones')
@@ -676,11 +738,15 @@ def main():
     
     args = parser.parse_args()
     
+    # Calcular interval en minutos (para uso interno)
+    interval_minutes = args.interval / 60.0
+    
     print("=" * 70)
-    print("HDP-HMM con bnpy para Segmentación de Latencia en RIPE Atlas (v5 - Bloques CSV)")
+    print("HDP-HMM con bnpy para Segmentación de Latencia en RIPE Atlas (v5.1)")
     print("=" * 70)
     print("Python: {}".format(sys.version))
     print("NumPy: {}".format(np.__version__))
+    print("Intervalo de medición: {} segundos ({} min/ciclo)".format(args.interval, interval_minutes))
     print("=" * 70)
     
     measurement_id, probe_id = extraer_ids_de_archivo(args.crudo)
@@ -690,6 +756,7 @@ def main():
     
     serie_completa, longitudes, cambios_longitud = cargar_csv_crudo(args.crudo, dest_hop=args.dest_hop)
     bloques = cargar_bloques_desde_csv(args.bloques_csv)
+    ciclos_excluidos = cargar_ciclos_excluidos(args.ciclos_excluidos)
     dict_categorias = cargar_categorias(args.categorias)
     
     if not serie_completa or not bloques:
@@ -707,13 +774,13 @@ def main():
         print("\n  [BLOQUE {}/{}] ID: {}, Longitud: {} hops, Ciclos totales: {}".format(
             idx + 1, len(bloques), bloque['bloque_id'], bloque['longitud'], bloque['ciclos']))
         
-        sub_serie = extraer_sub_serie(serie_completa, bloque)
+        # CORRECCIÓN CRÍTICA: extraer sub_serie excluyendo ciclos que no alcanzaron el destino
+        sub_serie = extraer_sub_serie(serie_completa, bloque, ciclos_excluidos)
         if len(sub_serie) < 10:
             print("    → Bloque demasiado pequeño, omitido.")
             continue
         
-        # >>> PRE-FILTRADO DE OUTLIERS (Percentil 99) <<<
-        # Se filtran los valores extremos para cumplir el supuesto Gaussiano del HDP-HMM
+        # PRE-FILTRADO DE OUTLIERS (Percentil 99)
         rtts_bloque = [rtt for _, rtt in sub_serie]
         umbral_p99 = np.percentile(rtts_bloque, 99.0)
         sub_serie_filtrada = [(ts, rtt) for ts, rtt in sub_serie if rtt <= umbral_p99]
@@ -761,8 +828,8 @@ def main():
         # Suavizado
         estados_suaves = [suavizar_estados(arr, args.min_dwell) for arr in estados_trabajo]
         
-        # Caracterización
-        segmentos = caracterizar_segmentos(sub_serie, secuencias, estados_trabajo, estados_suaves)
+        # CORRECCIÓN CRÍTICA: caracterizar segmentos usando interval_minutes correcto
+        segmentos = caracterizar_segmentos(sub_serie, secuencias, estados_trabajo, estados_suaves, interval_minutes)
         todos_segmentos.extend(segmentos)
         
         # Change-points
@@ -790,12 +857,12 @@ def main():
     print("  - Change-points con evento topológico: {}/{} ({:.1f}%)".format(
         n_topo, len(todos_change_points), 100.0 * n_topo / max(len(todos_change_points), 1)))
     
-    # Exportar
+    # Exportar (pasando interval_segundos para el resumen)
     exportar_resultados(
         serie_completa, secuencias_global, estados_por_secuencia_global, estados_suaves_por_secuencia_global,
         todos_change_points, todos_segmentos, metricas_calidad, args.output_dir,
         measurement_id, probe_id, longitudes=longitudes, cambios_longitud=cambios_longitud,
-        tipo_fusion=tipo_fusion, mapa_fusion=mapa_fusion)
+        tipo_fusion=tipo_fusion, mapa_fusion=mapa_fusion, interval_segundos=args.interval)
     
     print("\n" + "=" * 70)
     print("EJECUCIÓN COMPLETADA EXITOSAMENTE")
