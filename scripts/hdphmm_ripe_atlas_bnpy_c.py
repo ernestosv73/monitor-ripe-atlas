@@ -7,6 +7,19 @@ HDP-HMM con bnpy para Segmentación de Latencia en RIPE Atlas (v5)
 + Fusión de Estados (Automática por Bhattacharyya)
 + Agrupamiento de Segmentos Consecutivos por Tipo de Degradación
 =============================================================================
+Cambios respecto de v5:
+  1. --interval (segundos entre ciclos, obligatorio): duracion_minutos = n_ciclos * interval / 60
+     (antes estaba fijo en 10 min por ciclo).
+  2. --ciclos-excluidos (obligatorio): CSV ciclos_excluidos_measurement<M>_probe<P>.csv de verificar_caminos.py.
+     Esos ciclos (destino no alcanzado) se quitan de la serie, y cada subserie se arma por el rango de tiempo
+     [inicio, fin] del bloque y no por una cantidad de ciclos, que se desfasaba al contar ciclos excluidos.
+  2b. El CSV de excluidos trae una columna 'motivo' (sin_destino, parpadeo, transitorio). Se quitan de la serie
+     todos los ciclos del archivo; para verificar la ventana de cada bloque se descuentan de su 'ciclos' los
+     parpadeos y transitorios que el CSV ubica en ese bloque (bloque_id). Los sin_destino no se descuentan, porque
+     el CSV de bloques no los cuenta.
+  3. --percentil-outliers (default 0 = desactivado): el filtro de percentil por bloque ya no se aplica por defecto,
+     porque descartaba los ciclos de RTT mas alto, que en una degradacion sostenida son los del propio evento
+     (truncaba la meseta y subestimaba su magnitud). Los ciclos sin destino ya se quitan con --ciclos-excluidos.
 Basado en: Mouchet et al., "Large-Scale Characterization and Segmentation of
            Internet Path Delays with Infinite HMMs" (arXiv:1910.12714)
 
@@ -73,7 +86,48 @@ def cargar_mapa_macro_estados(ruta_archivo):
 # ============================================================================
 # FASE 1: PREPROCESAMIENTO DE DATOS
 # ============================================================================
-def cargar_csv_crudo(input_path, dest_hop=None):
+def cargar_ciclos_excluidos(path_csv):
+    """
+    Lee el CSV ciclos_excluidos_*.csv generado por verificar_caminos.py. Columnas usadas:
+      ciclo     : timestamp del ciclo (se quita de la serie, cualquiera sea el motivo)
+      motivo    : sin_destino | parpadeo | transitorio (si falta la columna, todos se tratan como sin_destino)
+      bloque_id : bloque que contiene al ciclo (puede estar vacio si cae entre dos bloques)
+    Devuelve (excluidos, por_bloque):
+      excluidos : set de timestamps a quitar de la serie
+      por_bloque: {bloque_id: cantidad de parpadeos/transitorios dentro del bloque}. El CSV de bloques cuenta esos
+                  ciclos en 'ciclos' (no los sin_destino), por lo que hay que descontarlos al verificar la ventana.
+    """
+    print("[FASE 1a] Cargando ciclos excluidos desde: {}".format(path_csv))
+    excluidos = set()
+    por_bloque = defaultdict(int)
+    por_motivo = defaultdict(int)
+    with open(path_csv, 'r') as f:
+        reader = csv.DictReader(f)
+        campos = reader.fieldnames or []
+        if 'ciclo' not in campos:
+            sys.stderr.write("[ERROR] {} no tiene la columna 'ciclo'. Debe ser el ciclos_excluidos_*.csv de "
+                             "verificar_caminos.py.\n".format(path_csv))
+            sys.exit(1)
+        if 'motivo' not in campos:
+            print("  [ADVERTENCIA] El archivo no tiene la columna 'motivo' (version anterior de verificar_caminos.py): "
+                  "se tratan todos los ciclos como sin_destino.")
+        for row in reader:
+            ts = row['ciclo'].strip()
+            if not ts:
+                continue
+            motivo = (row.get('motivo') or 'sin_destino').strip()
+            excluidos.add(ts)
+            por_motivo[motivo] += 1
+            if motivo in ('parpadeo', 'transitorio'):
+                bid = (row.get('bloque_id') or '').strip()
+                if bid:
+                    por_bloque[int(bid)] += 1
+    print("  - Ciclos excluidos: {} ({})".format(
+        len(excluidos), ", ".join("{}: {}".format(m, n) for m, n in sorted(por_motivo.items())) or "ninguno"))
+    return excluidos, dict(por_bloque)
+
+
+def cargar_csv_crudo(input_path, dest_hop=None, excluidos=None):
     print("[FASE 1] Cargando CSV crudo: {}".format(input_path))
     por_ciclo = defaultdict(dict)
     
@@ -95,9 +149,14 @@ def cargar_csv_crudo(input_path, dest_hop=None):
     cambios_longitud = []
     longitud_anterior = None
     
+    n_excluidos = 0
     for ts in sorted(por_ciclo.keys()):
         hops = por_ciclo[ts]
         if not hops:
+            continue
+        if excluidos and ts in excluidos:
+            # Ciclo sin destino alcanzado (verificar_caminos): su ultimo salto no es el destino y su RTT no es valido
+            n_excluidos += 1
             continue
         longitud_actual = max(hops.keys())
         
@@ -119,6 +178,9 @@ def cargar_csv_crudo(input_path, dest_hop=None):
             serie.append((ts, hops[longitud_actual], longitud_actual))
     
     print("  - Líneas procesadas: {}".format(n_lineas))
+    if excluidos:
+        print("  - Ciclos excluidos quitados de la serie: {} (de {} en el archivo de excluidos)".format(
+            n_excluidos, len(excluidos)))
     print("  - Ciclos extraídos: {}".format(len(serie)))
     return serie, longitudes, cambios_longitud
 
@@ -146,31 +208,38 @@ def cargar_bloques_desde_csv(bloques_path):
     return bloques
 
 
-def extraer_sub_serie(serie_completa, bloque):
+def extraer_sub_serie(serie_completa, bloque, excluidos_en_bloque=0):
     """
-    Extrae los ciclos del bloque buscando su timestamp de inicio y tomando 
-    una ventana del tamaño de 'ciclos', filtrando solo la longitud del bloque.
+    Extrae los ciclos del bloque por rango de tiempo [inicio, fin] (ambos inclusive), tal como los define
+    bloques_longitud_*.csv, y se queda solo con los de la longitud del bloque (el target real).
+
+    Antes se tomaba una ventana de 'ciclos' ciclos desde 'inicio'. Como serie_completa incluia ciclos que
+    verificar_caminos.py habia excluido (destino no alcanzado) y la columna 'ciclos' no los cuenta, la ventana
+    terminaba antes del fin real del bloque. Con los ciclos excluidos ya quitados de serie_completa, la cantidad de
+    ciclos dentro de [inicio, fin] debe coincidir con 'ciclos'; si no, se informa.
+    'excluidos_en_bloque' son los parpadeos/transitorios que el CSV de excluidos ubica en este bloque: ya se quitaron
+    de serie_completa pero siguen contados en 'ciclos', asi que se descuentan al comparar.
+    Los timestamps tienen formato fijo AAAA-MM-DD HH:MM:SS, asi que la comparacion de strings respeta el orden.
     """
     inicio_str = bloque['inicio']
+    fin_str = bloque['fin']
     longitud = bloque['longitud']
-    ciclos_esperados = bloque['ciclos']
-    
-    start_idx = -1
-    for i, (ts, rtt, lon) in enumerate(serie_completa):
-        if ts == inicio_str:
-            start_idx = i
-            break
-            
-    if start_idx == -1:
-        print("    [ADVERTENCIA] No se encontró el inicio del bloque: {}".format(inicio_str))
+    ciclos_esperados = bloque['ciclos'] - excluidos_en_bloque
+
+    window = [(ts, rtt, lon) for ts, rtt, lon in serie_completa if inicio_str <= ts <= fin_str]
+
+    if not window:
+        print("    [ADVERTENCIA] No hay ciclos entre {} y {}".format(inicio_str, fin_str))
         return []
-        
-    end_idx = min(start_idx + ciclos_esperados, len(serie_completa))
-    window = serie_completa[start_idx:end_idx]
-    
+    if len(window) != ciclos_esperados:
+        print("    [ADVERTENCIA] El bloque tiene {} ciclos entre {} y {}, pero se esperaban {} ({} del CSV de bloques "
+              "menos {} parpadeos/transitorios excluidos). Revisar que --crudo, --bloques-csv y --ciclos-excluidos "
+              "sean de la misma corrida de verificar_caminos."
+              .format(len(window), inicio_str, fin_str, ciclos_esperados, bloque['ciclos'], excluidos_en_bloque))
+
     # Filtrar solo las mediciones que coinciden con la longitud del bloque (el target real)
     sub_serie = [(ts, rtt) for ts, rtt, lon in window if lon == longitud]
-    
+
     return sub_serie
 
 
@@ -194,6 +263,11 @@ def cargar_categorias(path_csv):
 # ============================================================================
 # FASE 2: SEGMENTACIÓN TEMPORAL POR HUECOS
 # ============================================================================
+def fmt_min(x):
+    """Minutos sin ceros sobrantes: 60.0 -> '60', 12.5 -> '12.5'."""
+    return "{:.2f}".format(x).rstrip('0').rstrip('.')
+
+
 def parse_ts(ts_str):
     return datetime.strptime(ts_str, "%Y-%m-%d %H:%M:%S")
 
@@ -403,7 +477,8 @@ def detectar_change_points(secuencias, estados_por_secuencia):
     return change_points
 
 
-def caracterizar_segmentos(serie_completa, secuencias, estados_por_secuencia, estados_suaves_por_secuencia):
+def caracterizar_segmentos(serie_completa, secuencias, estados_por_secuencia, estados_suaves_por_secuencia,
+                           intervalo_min):
     segmentos = []
     for seq_id, (seq, estados_suaves) in enumerate(zip(secuencias, estados_suaves_por_secuencia)):
         start_idx = 0
@@ -411,21 +486,23 @@ def caracterizar_segmentos(serie_completa, secuencias, estados_por_secuencia, es
         
         for i in range(1, len(estados_suaves)):
             if estados_suaves[i] != estado_actual:
-                segmentos.append(_procesar_segmento(serie_completa, seq, start_idx, i - 1, seq_id, int(estado_actual)))
+                segmentos.append(_procesar_segmento(serie_completa, seq, start_idx, i - 1, seq_id, int(estado_actual),
+                                                    intervalo_min))
                 start_idx = i
                 estado_actual = estados_suaves[i]
         
-        segmentos.append(_procesar_segmento(serie_completa, seq, start_idx, len(estados_suaves) - 1, seq_id, int(estado_actual)))
+        segmentos.append(_procesar_segmento(serie_completa, seq, start_idx, len(estados_suaves) - 1, seq_id,
+                                            int(estado_actual), intervalo_min))
     
     return segmentos
 
-def _procesar_segmento(serie_completa, seq, start_idx, end_idx, seq_id, estado):
+def _procesar_segmento(serie_completa, seq, start_idx, end_idx, seq_id, estado, intervalo_min):
     rtts_seg = [serie_completa[idx][1] for idx in range(start_idx, end_idx + 1)]
     return {
         'seq_id': seq_id, 'estado': estado,
         'start_ts': seq[start_idx][0], 'end_ts': seq[end_idx][0],
         'n_ciclos': end_idx - start_idx + 1,
-        'duracion_minutos': (end_idx - start_idx + 1) * 10,
+        'duracion_minutos': (end_idx - start_idx + 1) * intervalo_min,
         'media': float(np.mean(rtts_seg)), 'mediana': float(np.median(rtts_seg)),
         'std': float(np.std(rtts_seg)), 'min': float(np.min(rtts_seg)), 'max': float(np.max(rtts_seg))
     }
@@ -575,7 +652,7 @@ def exportar_resultados(serie_completa, secuencias, estados_por_secuencia, estad
                         'media', 'mediana', 'std', 'min', 'max', 'tipo_degradacion'])
         for seg in segmentos:
             writer.writerow([seg['seq_id'], seg['estado'], seg['start_ts'], seg['end_ts'],
-                           seg['n_ciclos'], seg['duracion_minutos'], "{:.3f}".format(seg['media']),
+                           seg['n_ciclos'], fmt_min(seg['duracion_minutos']), "{:.3f}".format(seg['media']),
                            "{:.3f}".format(seg['mediana']), "{:.3f}".format(seg['std']),
                            "{:.3f}".format(seg['min']), "{:.3f}".format(seg['max']), seg['tipo_degradacion']])
     print("  - Segmentos caracterizados: {}".format(path_segmentos))
@@ -589,7 +666,7 @@ def exportar_resultados(serie_completa, secuencias, estados_por_secuencia, estad
                         'media', 'mediana', 'std', 'min', 'max', 'tipo_degradacion', 'n_segmentos_originales'])
         for grp in segmentos_agrupados:
             writer.writerow([grp['grupo_id'], grp['start_ts'], grp['end_ts'],
-                           grp['n_ciclos'], grp['duracion_minutos'], 
+                           grp['n_ciclos'], fmt_min(grp['duracion_minutos']), 
                            "{:.3f}".format(grp['media']), "{:.3f}".format(grp['mediana']),
                            "{:.3f}".format(grp['std']), "{:.3f}".format(grp['min']),
                            "{:.3f}".format(grp['max']), grp['tipo_degradacion'], 
@@ -655,6 +732,11 @@ def main():
     parser.add_argument('--crudo', required=True, help='CSV crudo de traceroute')
     parser.add_argument('--categorias', required=True, help='CSV de categorías Path Analysis')
     parser.add_argument('--bloques-csv', required=True, help='CSV de bloques generado por verificar_caminos.py')
+    parser.add_argument('--ciclos-excluidos', required=True,
+                        help='CSV ciclos_excluidos_measurement<M>_probe<P>.csv generado por verificar_caminos.py')
+    parser.add_argument('--interval', type=float, required=True,
+                        help='Intervalo de medicion de la sonda en segundos (p. ej. 300 o 900); '
+                             'duracion_minutos = n_ciclos * interval / 60')
     parser.add_argument('--output-dir', default='resultados_hdphmm', help='Directorio de salida')
     parser.add_argument('--dest-hop', type=int, default=None, help='Hop fijo de destino')
     parser.add_argument('--gap-minutes', type=float, default=90.0, help='Hueco temporal (min)')
@@ -672,15 +754,22 @@ def main():
     parser.add_argument('--macro-estados', action='store_true', help='Fusionar estados manualmente')
     parser.add_argument('--mapa-macro', type=str, default=None, help='Archivo CSV con mapa personalizado')
     parser.add_argument('--fusion-auto', action='store_true', help='Fusionar estados automáticamente por Bhattacharyya')
+    parser.add_argument('--percentil-outliers', type=float, default=0.0,
+                        help='Descarta por bloque los ciclos con RTT por encima de este percentil (p. ej. 99). '
+                             'Default 0 = sin filtro (el filtro borra ciclos del propio evento degradado)')
     parser.add_argument('--umbral-db', type=float, default=0.5, help='Distancia de Bhattacharyya máxima (default: 0.5)')
     
     args = parser.parse_args()
+    if args.interval <= 0:
+        parser.error("--interval debe ser mayor que 0 (segundos entre ciclos)")
+    intervalo_min = args.interval / 60.0
     
     print("=" * 70)
     print("HDP-HMM con bnpy para Segmentación de Latencia en RIPE Atlas (v5 - Bloques CSV)")
     print("=" * 70)
     print("Python: {}".format(sys.version))
     print("NumPy: {}".format(np.__version__))
+    print("Intervalo de medición: {:g} s ({:g} min por ciclo)".format(args.interval, intervalo_min))
     print("=" * 70)
     
     measurement_id, probe_id = extraer_ids_de_archivo(args.crudo)
@@ -688,7 +777,9 @@ def main():
         print("Measurement ID: {}\nProbe ID: {}".format(measurement_id, probe_id))
     print("=" * 70)
     
-    serie_completa, longitudes, cambios_longitud = cargar_csv_crudo(args.crudo, dest_hop=args.dest_hop)
+    excluidos, excluidos_por_bloque = cargar_ciclos_excluidos(args.ciclos_excluidos)
+    serie_completa, longitudes, cambios_longitud = cargar_csv_crudo(args.crudo, dest_hop=args.dest_hop,
+                                                                    excluidos=excluidos)
     bloques = cargar_bloques_desde_csv(args.bloques_csv)
     dict_categorias = cargar_categorias(args.categorias)
     
@@ -707,23 +798,30 @@ def main():
         print("\n  [BLOQUE {}/{}] ID: {}, Longitud: {} hops, Ciclos totales: {}".format(
             idx + 1, len(bloques), bloque['bloque_id'], bloque['longitud'], bloque['ciclos']))
         
-        sub_serie = extraer_sub_serie(serie_completa, bloque)
+        sub_serie = extraer_sub_serie(serie_completa, bloque,
+                                      excluidos_por_bloque.get(bloque['bloque_id'], 0))
         if len(sub_serie) < 10:
             print("    → Bloque demasiado pequeño, omitido.")
             continue
         
-        # >>> PRE-FILTRADO DE OUTLIERS (Percentil 99) <<<
-        # Se filtran los valores extremos para cumplir el supuesto Gaussiano del HDP-HMM
-        rtts_bloque = [rtt for _, rtt in sub_serie]
-        umbral_p99 = np.percentile(rtts_bloque, 99.0)
-        sub_serie_filtrada = [(ts, rtt) for ts, rtt in sub_serie if rtt <= umbral_p99]
-        n_filtrados = len(sub_serie) - len(sub_serie_filtrada)
-        print("    → Outliers filtrados (RTT > P99={:.2f}ms): {}".format(umbral_p99, n_filtrados))
-        sub_serie = sub_serie_filtrada
-        
-        if len(sub_serie) < 10:
-            print("    → Bloque demasiado pequeño tras filtrar outliers, omitido.")
-            continue
+        # >>> PRE-FILTRADO OPCIONAL DE OUTLIERS POR PERCENTIL (--percentil-outliers, default 0 = desactivado) <<<
+        # Cortar el percentil mas alto de cada bloque borra los ciclos de RTT mas alto, que en una degradacion
+        # sostenida son los del propio evento. Por eso esta apagado por defecto.
+        if args.percentil_outliers > 0:
+            rtts_bloque = [rtt for _, rtt in sub_serie]
+            umbral_p = np.percentile(rtts_bloque, args.percentil_outliers)
+            sub_serie_filtrada = [(ts, rtt) for ts, rtt in sub_serie if rtt <= umbral_p]
+            n_filtrados = len(sub_serie) - len(sub_serie_filtrada)
+            print("    → Outliers filtrados (RTT > P{:g}={:.2f}ms): {}".format(
+                args.percentil_outliers, umbral_p, n_filtrados))
+            sub_serie = sub_serie_filtrada
+
+            if len(sub_serie) < 10:
+                print("    → Bloque demasiado pequeño tras filtrar outliers, omitido.")
+                continue
+        else:
+            print("    → Sin filtro de outliers por percentil (RTT max del bloque: {:.2f}ms)".format(
+                max(rtt for _, rtt in sub_serie)))
 
         print("    → Ciclos extraídos para análisis: {}".format(len(sub_serie)))
         
@@ -762,7 +860,7 @@ def main():
         estados_suaves = [suavizar_estados(arr, args.min_dwell) for arr in estados_trabajo]
         
         # Caracterización
-        segmentos = caracterizar_segmentos(sub_serie, secuencias, estados_trabajo, estados_suaves)
+        segmentos = caracterizar_segmentos(sub_serie, secuencias, estados_trabajo, estados_suaves, intervalo_min)
         todos_segmentos.extend(segmentos)
         
         # Change-points
