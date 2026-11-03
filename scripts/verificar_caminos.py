@@ -9,8 +9,11 @@ Integra las 3 comprobaciones y las cruza en una sola salida:
   3. Tramos consecutivos con la misma longitud (sostenidos vs parpadeos).
   + BLOQUES (tramos sostenidos de igual longitud unidos cuando los separan solo transitorios), tambien en
     bloques_longitud_measurement<M>_probe<P>.csv (junto a tramos_longitud_...csv).
-  + CICLOS EXCLUIDOS (destino no alcanzado) en ciclos_excluidos_measurement<M>_probe<P>.csv: todos los ciclos de la
-    seccion DESTINO NO ALCANZADO, con el tramo (y bloque) al que corresponden.
+  + CICLOS EXCLUIDOS en ciclos_excluidos_measurement<M>_probe<P>.csv: los ciclos que no entran en los tramos
+    sostenidos, con la columna 'motivo': sin_destino (seccion DESTINO NO ALCANZADO; su RTT no es valido),
+    parpadeo (tramo de 1 ciclo) o transitorio (tramo de 2 a P-1 ciclos; llegaron al destino por otra ruta pasajera).
+    Se informa el tramo y el bloque de cada ciclo; los parpadeos/transitorios dentro de un bloque son los de la
+    columna 'fuera' de bloques_longitud_*.csv.
   + Cruce 1 x 2: cuantos eventos del extractor corresponden a un cambio de camino real.
   + LECTURA: conclusiones automaticas.
 
@@ -535,12 +538,18 @@ def main():
             wb.writerow([k_ + 1, lg, tss[i0], tss[i1], "{0:.1f}".format(n_ * cad_s / 3600.0), n_, fuera_,
                          bloques_n[k_], int(lg == modal_b)])
     W("Bloques exportados a: {0}".format(csvb))
-    # Ciclos excluidos (destino no alcanzado): los mismos de la seccion DESTINO NO ALCANZADO, TODOS (la consola muestra 40),
-    # mas el tramo al que corresponden. 'tramo_n' es la posicion (1..N) del tramo en tramos_longitud_*.csv y
-    # 'tramo_inicio' su columna 'inicio'. Un ciclo excluido no pertenece a ningun tramo (los tramos se arman solo con
-    # ciclos que llegaron al destino): se le asigna el tramo que interrumpe, es decir el de los ciclos que lo rodean.
-    # Si el anterior y el siguiente son de tramos distintos (cae justo en una frontera), se asigna el anterior,
-    # 'entre_tramos' = 1 y 'tramo_siguiente_n' indica el otro.
+    # Ciclos excluidos, TODOS (la consola muestra 40 de los sin destino), con la columna 'motivo':
+    #   sin_destino : el ultimo salto no es el destino (seccion DESTINO NO ALCANZADO). Su RTT NO es valido.
+    #   parpadeo    : ciclo de un tramo de 1 ciclo (longitud distinta de la de los tramos vecinos).
+    #   transitorio : ciclo de un tramo de 2 a P-1 ciclos. Llego al destino, pero por una ruta pasajera.
+    # 'tramo_n' es la posicion (1..N) del tramo en tramos_longitud_*.csv y 'tramo_inicio' su columna 'inicio'.
+    #  - parpadeo/transitorio: es su propio tramo (sostenido = 0). 'bloque_id' es el bloque que lo contiene, o vacio
+    #    si cae entre dos bloques; dentro de un bloque son los ciclos de la columna 'fuera' de bloques_longitud_*.csv.
+    #    'misma_longitud_que_tramo' no aplica (vacio).
+    #  - sin_destino: no pertenece a ningun tramo (los tramos se arman solo con ciclos que llegaron al destino): se le
+    #    asigna el tramo que interrumpe, es decir el de los ciclos que lo rodean. Si el anterior y el siguiente son de
+    #    tramos distintos (cae justo en una frontera), se asigna el anterior, 'entre_tramos' = 1 y
+    #    'tramo_siguiente_n' indica el otro.
     import bisect
     run_de = []          # posicion en tss -> indice (0-based) del tramo
     for k_, r_ in enumerate(runs):
@@ -549,39 +558,57 @@ def main():
     for k_, (lg_, i0_, i1_) in enumerate(bloques):
         for i_ in range(i0_, i1_ + 1):
             bloque_de[i_] = k_ + 1
+    filas = []           # (ciclo, fila del CSV)
+    for t in no_alc:
+        k, ip, asn = ult[t]
+        r = rtts[t].get(k)
+        pos = bisect.bisect_left(tss, t)          # primer ciclo con destino posterior a t
+        prev_i, next_i = pos - 1, pos
+        tiene_prev, tiene_next = prev_i >= 0, next_i < len(tss)
+        if not tiene_prev and not tiene_next:
+            tr_i, entre, sig = None, 0, None
+        elif not tiene_prev:
+            tr_i, entre, sig = run_de[next_i], 0, None
+        elif not tiene_next:
+            tr_i, entre, sig = run_de[prev_i], 0, None
+        elif run_de[prev_i] == run_de[next_i]:
+            tr_i, entre, sig = run_de[prev_i], 0, None
+        else:
+            tr_i, entre, sig = run_de[prev_i], 1, run_de[next_i] + 1
+        bl = bloque_de.get(prev_i) if tiene_prev else None
+        if tiene_next and bloque_de.get(next_i) != bl:
+            bl = None if tiene_prev else bloque_de.get(next_i)
+        if tr_i is None:
+            fila_tr = ["", "", "", "", ""]
+        else:
+            h_, n_, t0_ = runs[tr_i]
+            fila_tr = [tr_i + 1, t0_, h_, int(n_ >= P), int(k == h_)]
+        filas.append((t, [t, k, ip, asn, "" if r is None else "{0:.3f}".format(r), int(es_privada(ip)),
+                          "sin_destino"] + fila_tr + [entre, "" if sig is None else sig, "" if bl is None else bl]))
+    pos0 = 0
+    for tr_i, (h_, n_, t0_) in enumerate(runs):
+        if n_ < P:
+            motivo = "parpadeo" if n_ == 1 else "transitorio"
+            for pos in range(pos0, pos0 + n_):
+                t = tss[pos]
+                k, ip, asn = ult[t]
+                r = rtts[t].get(k)
+                bl = bloque_de.get(pos)
+                filas.append((t, [t, k, ip, asn, "" if r is None else "{0:.3f}".format(r), int(es_privada(ip)),
+                                  motivo, tr_i + 1, t0_, h_, 0, "", 0, "", "" if bl is None else bl]))
+        pos0 += n_
+    filas.sort(key=lambda x: x[0])
     csve = os.path.join(a.output_dir, "ciclos_excluidos{0}.csv".format(suf0))
     with open(csve, "w", newline="") if sys.version_info[0] >= 3 else open(csve, "wb") as fe:
         we = csv.writer(fe)
-        we.writerow(["ciclo", "salto", "ultimo_salto_ip", "asn", "rtt_ms", "privada",
+        we.writerow(["ciclo", "salto", "ultimo_salto_ip", "asn", "rtt_ms", "privada", "motivo",
                      "tramo_n", "tramo_inicio", "tramo_longitud", "tramo_sostenido", "misma_longitud_que_tramo",
                      "entre_tramos", "tramo_siguiente_n", "bloque_id"])
-        for t in no_alc:
-            k, ip, asn = ult[t]
-            r = rtts[t].get(k)
-            pos = bisect.bisect_left(tss, t)          # primer ciclo con destino posterior a t
-            prev_i, next_i = pos - 1, pos
-            tiene_prev, tiene_next = prev_i >= 0, next_i < len(tss)
-            if not tiene_prev and not tiene_next:
-                tr_i, entre, sig = None, 0, None
-            elif not tiene_prev:
-                tr_i, entre, sig = run_de[next_i], 0, None
-            elif not tiene_next:
-                tr_i, entre, sig = run_de[prev_i], 0, None
-            elif run_de[prev_i] == run_de[next_i]:
-                tr_i, entre, sig = run_de[prev_i], 0, None
-            else:
-                tr_i, entre, sig = run_de[prev_i], 1, run_de[next_i] + 1
-            bl = bloque_de.get(prev_i) if tiene_prev else None
-            if tiene_next and bloque_de.get(next_i) != bl:
-                bl = None if tiene_prev else bloque_de.get(next_i)
-            if tr_i is None:
-                fila_tr = ["", "", "", "", ""]
-            else:
-                h_, n_, t0_ = runs[tr_i]
-                fila_tr = [tr_i + 1, t0_, h_, int(n_ >= P), int(k == h_)]
-            we.writerow([t, k, ip, asn, "" if r is None else "{0:.3f}".format(r), int(es_privada(ip))]
-                        + fila_tr + [entre, "" if sig is None else sig, "" if bl is None else bl])
-    W("Ciclos excluidos exportados a: {0}  ({1} ciclos)".format(csve, len(no_alc)))
+        for _, fila in filas:
+            we.writerow(fila)
+    por_motivo = Counter(f[1][6] for f in filas)
+    W("Ciclos excluidos exportados a: {0}  ({1} ciclos: {2} sin_destino, {3} parpadeo, {4} transitorio)".format(
+        csve, len(filas), por_motivo["sin_destino"], por_motivo["parpadeo"], por_motivo["transitorio"]))
     if not a.sin_html:
         htmlp = os.path.join(a.output_dir, "caminos{0}.html".format(suf0))
         datos = datos_visor(mid, pid, cad_s, todos, ciclos, ips, rtts, alcanzados, info_dest,
