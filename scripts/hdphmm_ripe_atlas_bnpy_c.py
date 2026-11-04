@@ -20,6 +20,8 @@ Cambios respecto de v5:
   3. --percentil-outliers (default 0 = desactivado): el filtro de percentil por bloque ya no se aplica por defecto,
      porque descartaba los ciclos de RTT mas alto, que en una degradacion sostenida son los del propio evento
      (truncaba la meseta y subestimaba su magnitud). Los ciclos sin destino ya se quitan con --ciclos-excluidos.
+  4. La clasificacion de severidad usa la MEDIANA del segmento (no la media): los spikes inflaban la media y
+     cambiaban la etiqueta del segmento, partiendo grupos. Resto de la regla (umbrales, P25 global) sin cambios.
 Basado en: Mouchet et al., "Large-Scale Characterization and Segmentation of
            Internet Path Delays with Infinite HMMs" (arXiv:1910.12714)
 
@@ -523,7 +525,8 @@ def calcular_calidad_segmentacion(serie_completa, segmentos):
     }
 
 def clasificar_tipo_degradacion(segmento, rtt_normal):
-    desviacion = segmento['media'] - rtt_normal
+    # Cambio 4: se usa la MEDIANA del segmento (robusta a spikes) en lugar de la media
+    desviacion = segmento['mediana'] - rtt_normal
     duracion = segmento['duracion_minutos']
     
     if duracion > 60 and abs(desviacion) > 5: return 'degradacion_severa_sostenida'
