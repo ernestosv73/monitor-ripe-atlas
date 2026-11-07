@@ -1,0 +1,1067 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Visor de RTT: tramos y bloques</title>
+<style>
+:root{
+  --bg:#f4f6f9;--panel:#ffffff;--ink:#1b2430;--mut:#667386;--line:#d8dee7;--grid:#e6ebf1;--accent:#2563eb;
+  --pt:#2563eb;--pt2:#ea580c;--pt3:#94a3b8;--nodest:#dc2626;--med:#0b1220;--sel:#f59e0b;--fuera:#dc2626;
+  --b0:#2563eb;--b1:#0d9488;--b2:#7c3aed;--b3:#ea580c;--b4:#db2777;--b5:#65a30d;
+  --k0:#16a34a;--k1:#64748b;--k2:#f59e0b;--k3:#dc2626;--k4:#7c3aed;--k5:#0d9488;
+  --chip:#eef2f7;--hover:#e8eef8;--warnbg:#fff7e6;--warnbd:#f2c36b;
+}
+@media (prefers-color-scheme:dark){
+  :root{
+    --bg:#11151b;--panel:#1a2029;--ink:#e6ebf2;--mut:#93a0b3;--line:#2c3542;--grid:#252e3a;--accent:#6ea0ff;
+    --pt:#6ea0ff;--pt2:#fb923c;--pt3:#64748b;--nodest:#f87171;--med:#f1f5f9;--sel:#fbbf24;--fuera:#f87171;
+    --b0:#6ea0ff;--b1:#2dd4bf;--b2:#a78bfa;--b3:#fb923c;--b4:#f472b6;--b5:#a3e635;
+    --k0:#4ade80;--k1:#94a3b8;--k2:#fbbf24;--k3:#f87171;--k4:#a78bfa;--k5:#2dd4bf;
+    --chip:#232c38;--hover:#222c3a;--warnbg:#3a2f14;--warnbd:#8a6a1f;
+  }
+}
+*{box-sizing:border-box}
+html,body{margin:0;background:var(--bg);color:var(--ink);font:13px/1.4 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
+header{padding:10px 16px;display:flex;flex-wrap:wrap;gap:8px 16px;align-items:baseline;border-bottom:1px solid var(--line);background:var(--panel)}
+header h1{font-size:16px;margin:0;font-weight:650}
+.chip{background:var(--chip);border-radius:999px;padding:2px 10px;color:var(--mut);font-size:12px}
+.chip b{color:var(--ink);font-weight:600}
+.helpbtn{margin-left:auto}
+main{padding:12px 16px;display:grid;gap:12px;grid-template-columns:minmax(0,1fr) 480px;align-items:start}
+@media (max-width:1050px){main{grid-template-columns:minmax(0,1fr)}}
+.col{display:flex;flex-direction:column;gap:12px;min-width:0}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:10px;min-width:0}
+.ptitle{display:flex;flex-wrap:wrap;align-items:baseline;gap:4px 12px;padding:9px 12px 0}
+.ptitle h2{font-size:14px;margin:0;font-weight:650}
+.ptitle span{color:var(--mut);font-size:12px}
+.toolbar{display:flex;flex-wrap:wrap;gap:6px 14px;align-items:center;padding:8px 10px;border-bottom:1px solid var(--line)}
+.grp{display:flex;align-items:center;gap:4px}
+.grp>label{color:var(--mut);font-size:12px;margin-right:2px;display:inline-flex;align-items:center;gap:4px}
+button.b,select,input[type=text]{font:inherit;color:var(--ink);background:var(--panel);border:1px solid var(--line);border-radius:7px;padding:3px 9px}
+button.b{cursor:pointer}
+button.b:hover:not(:disabled){background:var(--hover)}
+button.b:disabled{opacity:.45;cursor:default}
+.rng input[type=number]{width:74px;font:inherit;color:var(--ink);background:var(--panel);border:1px solid var(--line);border-radius:7px;padding:3px 6px}
+.rng input[type=datetime-local]{font:inherit;color:var(--ink);background:var(--panel);border:1px solid var(--line);border-radius:7px;padding:2px 6px;color-scheme:light dark}
+.count{margin-left:auto;color:var(--mut);font-size:12px}
+.cwrap{position:relative;padding:6px 8px 2px}
+canvas{display:block;width:100%;cursor:crosshair;border-radius:6px}
+.cur{position:absolute;top:6px;width:1px;background:var(--mut);opacity:.55;pointer-events:none;display:none}
+.selbox{position:absolute;top:6px;background:var(--accent);opacity:.16;pointer-events:none;display:none;border-left:1px solid var(--accent);border-right:1px solid var(--accent)}
+.legend{display:flex;flex-wrap:wrap;gap:4px 14px;color:var(--mut);font-size:12px;padding:2px 12px 8px}
+.legend i{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:5px;vertical-align:-1px}
+.legend s{display:inline-block;width:14px;height:0;border-top:3px solid var(--med);margin-right:5px;vertical-align:2px;text-decoration:none}
+.legend u{display:inline-block;width:14px;height:0;border-top:2px dashed var(--mut);margin-right:5px;vertical-align:2px;text-decoration:none}
+.legend em{display:inline-block;width:12px;height:8px;border-radius:2px;margin-right:5px;vertical-align:0;font-style:normal}
+.stats{display:grid;grid-template-columns:repeat(auto-fill,minmax(104px,1fr));gap:6px;padding:0 12px 12px}
+.stats .k{background:var(--chip);border-radius:8px;padding:5px 8px}
+.stats .k small{display:block;color:var(--mut);font-size:11px}
+.stats .k b{font-size:14px;font-weight:600;font-variant-numeric:tabular-nums}
+.stats .hd{grid-column:1/-1;font-weight:600}
+.empty{padding:26px 16px;color:var(--mut);text-align:center}
+#files{margin:12px 16px 0;padding:10px 12px;display:flex;flex-wrap:wrap;gap:8px 12px;align-items:center}
+#files .slot{display:flex;align-items:center;gap:8px;border:1px dashed var(--line);border-radius:8px;padding:6px 10px;min-width:0;flex:1 1 230px}
+#files .slot>div{min-width:0}
+#files .slot b,#files .slot small{overflow-wrap:anywhere}
+#files .slot.ok{border-style:solid;border-color:#16a34a}
+#files .slot b{display:block;font-weight:600}
+#files .slot small{color:var(--mut)}
+#files .slot .st{font-size:18px;color:var(--mut)}
+#files .slot.ok .st{color:#16a34a}
+#files.over{outline:2px dashed var(--accent)}
+.warn{margin:8px 16px 0;background:var(--warnbg);border:1px solid var(--warnbd);border-radius:8px;padding:6px 10px}
+aside{display:flex;flex-direction:column;gap:12px;position:sticky;top:8px;max-height:calc(100vh - 16px);min-width:0}
+@media (max-width:1050px){aside{position:static;max-height:none}}
+.lcard{display:flex;flex-direction:column;flex:1 1 0;min-height:170px;overflow:hidden}
+@media (max-width:1050px){.lcard{height:340px;flex:none}}
+.lcard .toolbar{border-bottom:1px solid var(--line)}
+.pane{overflow:auto;flex:1;min-height:0}
+table{border-collapse:collapse;width:100%}
+.lcard table{font-size:12px}
+th,td{text-align:left;padding:3px 5px;border-bottom:1px solid var(--line);white-space:nowrap}
+th{color:var(--mut);font-weight:500;font-size:12px;position:sticky;top:0;background:var(--panel);cursor:pointer;user-select:none}
+th:hover{color:var(--ink)}
+td.n,th.n{text-align:right;font-variant-numeric:tabular-nums}
+tr.click{cursor:pointer}
+tr.click:hover{background:var(--hover)}
+tr.sel{background:color-mix(in srgb,var(--sel) 26%,transparent)}
+.sw{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:5px;vertical-align:-1px}
+.mut{color:var(--mut)}
+.tip{position:fixed;z-index:20;max-width:340px;background:var(--panel);color:var(--ink);border:1px solid var(--line);border-radius:8px;
+  box-shadow:0 4px 18px rgba(0,0,0,.18);padding:7px 10px;font-size:12px;pointer-events:none;white-space:pre-line;display:none}
+#help{position:fixed;inset:0;z-index:50;background:rgba(0,0,0,.45);display:none;align-items:flex-start;justify-content:center;padding:4vh 12px;overflow:auto}
+#help.open{display:flex}
+#help .box{background:var(--panel);color:var(--ink);border:1px solid var(--line);border-radius:12px;max-width:820px;width:100%;padding:18px 22px 22px;box-shadow:0 12px 40px rgba(0,0,0,.35)}
+#help h2{margin:0 0 4px;font-size:17px}
+#help h3{margin:16px 0 6px;font-size:14px}
+#help p,#help li{margin:4px 0}
+#help ul{margin:4px 0 4px 18px;padding:0}
+#help code{background:var(--chip);border-radius:4px;padding:0 4px}
+#help .top{display:flex;align-items:center;gap:12px}
+#help .top .b{margin-left:auto}
+footer{padding:4px 16px 16px;color:var(--mut);font-size:12px}
+</style>
+</head>
+<body>
+<header>
+  <h1>Visor de RTT: tramos y bloques</h1>
+  <span class="chip">Measurement <b id="hM">–</b></span>
+  <span class="chip">Probe <b id="hP">–</b></span>
+  <span class="chip"><b id="hN">0</b> ciclos con destino</span>
+  <span class="chip" id="hRange">sin datos</span>
+  <span class="chip" id="hDest">destino: –</span>
+  <span class="chip" id="hCad">cadencia: –</span>
+  <button class="b helpbtn" id="bHelp" title="Cómo leer el visor (tecla ?)">? Ayuda</button>
+</header>
+
+<section class="card" id="files">
+  <div class="slot" id="sH"><span class="st">○</span><div><b>historial_traceroute_…csv</b><small id="nH">timestamp, hop, ip, asn, rtt_ms</small></div><label class="b" style="margin-left:auto;cursor:pointer;border:1px solid var(--line);border-radius:7px;padding:3px 9px">Elegir<input type="file" id="fH" accept=".csv,.txt" style="display:none"></label></div>
+  <div class="slot" id="sT"><span class="st">○</span><div><b>tramos_longitud_…csv</b><small id="nT">inicio, longitud, ciclos, sostenido</small></div><label class="b" style="margin-left:auto;cursor:pointer;border:1px solid var(--line);border-radius:7px;padding:3px 9px">Elegir<input type="file" id="fT" accept=".csv,.txt" style="display:none"></label></div>
+  <div class="slot" id="sB"><span class="st">○</span><div><b>bloques_longitud_…csv</b><small id="nB">bloque_id, longitud, inicio, fin, …</small></div><label class="b" style="margin-left:auto;cursor:pointer;border:1px solid var(--line);border-radius:7px;padding:3px 9px">Elegir<input type="file" id="fB" accept=".csv,.txt" style="display:none"></label></div>
+  <div class="slot" id="sG"><span class="st">○</span><div><b>segmentos_caracterizados_agrupados_…csv</b><small id="nG">opcional · grupo_id, start_ts, end_ts, n_ciclos, duracion_minutos, tipo_degradacion</small></div><label class="b" style="margin-left:auto;cursor:pointer;border:1px solid var(--line);border-radius:7px;padding:3px 9px">Elegir<input type="file" id="fG" accept=".csv,.txt" style="display:none"></label></div>
+  <div class="slot" id="sX"><span class="st">○</span><div><b>ciclos_excluidos_…csv</b><small id="nX">opcional · ciclo, motivo, … (verificar_caminos)</small></div><label class="b" style="margin-left:auto;cursor:pointer;border:1px solid var(--line);border-radius:7px;padding:3px 9px">Elegir<input type="file" id="fX" accept=".csv,.txt" style="display:none"></label></div>
+</section>
+<div id="msg"></div>
+
+<main>
+  <div class="col">
+    <!-- PANEL PRINCIPAL -->
+    <section class="card" id="p1">
+      <div class="ptitle"><h2>Panel principal · RTT del último salto (destino alcanzado)</h2><span>cada punto es un ciclo; valores en ms</span></div>
+      <div class="toolbar">
+        <div class="grp"><label>Zoom</label><button class="b" data-a="out">−</button><button class="b" data-a="in">+</button><button class="b" data-a="l">◀</button><button class="b" data-a="r">▶</button><button class="b" data-a="fit">Ver todo</button></div>
+        <div class="grp"><button class="b" id="zT" disabled>Zoom al tramo</button><button class="b" id="zB" disabled>Zoom al bloque</button></div>
+        <div class="grp"><label><input type="checkbox" id="cND" checked> Ciclos sin destino</label><label><input type="checkbox" id="cLane" checked> Carriles</label></div>
+        <span class="count" id="cnt1"></span>
+      </div>
+      <div class="cwrap"><canvas></canvas><div class="cur"></div><div class="selbox"></div></div>
+      <div class="legend">
+        <span><i style="background:var(--pt)"></i>tramo sostenido · longitud modal</span>
+        <span><i style="background:var(--pt2)"></i>tramo sostenido · otra longitud</span>
+        <span><i style="background:var(--pt3)"></i>tramo no sostenido</span>
+        <span><i style="background:var(--nodest)"></i>ciclo sin destino</span>
+        <span><em style="background:color-mix(in srgb,var(--sel) 40%,transparent)"></em>selección</span>
+        <span class="mut">Arrastrar = zoom · doble clic = ver todo · clic en carriles = elegir tramo/bloque</span>
+      </div>
+    </section>
+
+    <!-- PANEL TRAMOS -->
+    <section class="card" id="p2">
+      <div class="ptitle"><h2>Tramos · RTT</h2><span id="t2">sin selección: todos los tramos</span></div>
+      <div class="toolbar">
+        <div class="grp"><label>Zoom</label><button class="b" data-a="out">−</button><button class="b" data-a="in">+</button><button class="b" data-a="l">◀</button><button class="b" data-a="r">▶</button><button class="b" data-a="fit">Ajustar</button></div>
+        <div class="grp"><label>Tramo</label><button class="b" data-a="prev">◀ anterior</button><button class="b" data-a="next">siguiente ▶</button><button class="b" data-a="clear">Quitar selección</button></div>
+        <span class="count" id="cnt2"></span>
+      </div>
+      <div class="cwrap"><canvas></canvas><div class="cur"></div><div class="selbox"></div></div>
+      <div class="legend" id="lg2">
+        <span><i style="background:var(--pt)"></i>sostenido · modal</span>
+        <span><i style="background:var(--pt2)"></i>sostenido · otra longitud</span>
+        <span><i style="background:var(--pt3)"></i>no sostenido</span>
+        <span><s></s>mediana del tramo</span>
+        <span><u></u>p5 / p95 (tramo elegido)</span>
+        <span class="mut">Clic en un punto = elegir su tramo</span>
+      </div>
+      <div class="stats" id="st2"></div>
+    </section>
+
+    <!-- PANEL BLOQUES -->
+    <section class="card" id="p3">
+      <div class="ptitle"><h2>Bloques · RTT</h2><span id="t3">sin selección: todos los bloques</span></div>
+      <div class="toolbar">
+        <div class="grp"><label>Zoom</label><button class="b" data-a="out">−</button><button class="b" data-a="in">+</button><button class="b" data-a="l">◀</button><button class="b" data-a="r">▶</button><button class="b" data-a="fit">Ajustar</button></div>
+        <div class="grp"><label>Bloque</label><button class="b" data-a="prev">◀ anterior</button><button class="b" data-a="next">siguiente ▶</button><button class="b" data-a="clear">Quitar selección</button></div>
+        <div class="grp"><label><input type="checkbox" id="cTrIn" checked> Mediana de tramos dentro del bloque</label></div>
+        <span class="count" id="cnt3"></span>
+      </div>
+      <div class="cwrap"><canvas></canvas><div class="cur"></div><div class="selbox"></div></div>
+      <div class="legend" id="lg3">
+        <span><i style="background:var(--b0)"></i><i style="background:var(--b1)"></i><i style="background:var(--b2)"></i>colores por bloque</span>
+        <span><i style="background:var(--fuera)"></i>ciclo «fuera» (otra longitud dentro del bloque)</span>
+        <span><s></s>mediana del bloque</span>
+        <span><u></u>mediana de cada tramo sostenido (dentro del bloque)</span>
+        <span class="mut">Clic en un punto = elegir su bloque</span>
+      </div>
+      <div class="stats" id="st3"></div>
+    </section>
+
+    <!-- PANEL GRUPOS HDP-HMM -->
+    <section class="card" id="p4">
+      <div class="ptitle"><h2>Grupos HDP-HMM · tipo de degradación</h2><span id="t4">carga segmentos_caracterizados_agrupados_…csv</span></div>
+      <div class="toolbar">
+        <div class="grp"><label>Zoom</label><button class="b" data-a="out">−</button><button class="b" data-a="in">+</button><button class="b" data-a="l">◀</button><button class="b" data-a="r">▶</button><button class="b" data-a="fit">Ajustar</button></div>
+        <div class="grp"><label>Grupo</label><button class="b" data-a="prev">◀ anterior</button><button class="b" data-a="next">siguiente ▶</button><button class="b" data-a="clear">Quitar selección</button></div>
+        <span class="count" id="cnt4"></span>
+      </div>
+      <div class="cwrap"><canvas></canvas><div class="cur"></div><div class="selbox"></div></div>
+      <div class="legend" id="lg4"></div>
+      <div class="stats" id="st4"></div>
+    </section>
+  </div>
+
+  <aside>
+    <section class="card lcard" id="aT">
+      <div class="ptitle"><h2>Tramos</h2><span id="aTn"></span></div>
+      <div class="toolbar">
+        <div class="grp"><label>Mostrar</label>
+          <select id="fT2"><option value="all">Todos</option><option value="sost" selected>Sostenidos</option><option value="mod">Sostenidos · modal</option><option value="nomod">Sostenidos · otra longitud</option><option value="nosost">No sostenidos</option></select></div>
+      </div>
+      <div class="pane" id="lT"></div>
+    </section>
+    <section class="card lcard" id="aB">
+      <div class="ptitle"><h2>Bloques</h2><span id="aBn"></span></div>
+      <div class="toolbar">
+        <div class="grp"><label>Mostrar</label>
+          <select id="fB2"><option value="all" selected>Todos</option><option value="mod">Longitud modal</option><option value="nomod">Otra longitud</option></select></div>
+      </div>
+      <div class="pane" id="lB"></div>
+    </section>
+    <section class="card lcard" id="aG">
+      <div class="ptitle"><h2>Grupos HDP-HMM</h2><span id="aGn"></span></div>
+      <div class="toolbar">
+        <div class="grp"><label>Tipo</label><select id="fG2"><option value="all">Todos</option></select></div>
+      </div>
+      <div class="pane" id="lG"></div>
+    </section>
+  </aside>
+</main>
+<footer id="foot">Hora en UTC. Todo se calcula en el navegador; los archivos no se envían a ningún servidor.</footer>
+<div class="tip" id="tip"></div>
+
+<div id="help">
+  <div class="box">
+    <div class="top"><h2>Cómo leer el visor</h2><button class="b" id="bHelpX">Cerrar (Esc)</button></div>
+    <h3>Archivos</h3>
+    <ul>
+      <li><code>historial_traceroute_…csv</code>: el historial del extractor (timestamp, hop, ip, asn, rtt_ms). Es la única fuente de RTT.</li>
+      <li><code>tramos_longitud_…csv</code> y <code>bloques_longitud_…csv</code>: salidas de <code>verificar_caminos.py</code> para el <b>mismo</b> historial y la misma persistencia. Se pueden cargar en cualquier orden, o arrastrar los tres a la ventana.</li>
+    </ul>
+    <ul>
+      <li><code>segmentos_caracterizados_agrupados_…csv</code> (opcional): salida del script HDP-HMM. Se usan solo <code>start_ts</code>, <code>end_ts</code>, <code>n_ciclos</code>, <code>duracion_minutos</code> y <code>tipo_degradacion</code>; el panel «Grupos» pinta cada grupo sobre el RTT del historial según su tipo. El visor avisa si <code>duracion_minutos</code> o <code>n_ciclos</code> no coinciden con las fechas y el historial.</li>
+      <li><code>ciclos_excluidos_…csv</code> (opcional): salida de <code>verificar_caminos.py</code> con los ciclos que el HDP-HMM no usa (<code>sin_destino</code>, <code>parpadeo</code>, <code>transitorio</code>). Con él, el visor descuenta esos ciclos de los ciclos del historial de cada grupo antes de avisar que <code>n_ciclos</code> o <code>duracion_minutos</code> no coinciden, y el aviso lista los grupos que siguen sin cuadrar.</li>
+    </ul>
+    <h3>Qué se grafica</h3>
+    <ul>
+      <li><b>Último salto con destino alcanzado</b> (target válido): el RTT del salto de mayor número de cada ciclo, solo si ese salto no es una IP privada y pertenece al ASN modal del último salto (o es una IP frecuente, ≥ 2 % de los ciclos). Es la misma regla de <code>verificar_caminos.py</code>. Los ciclos que no cumplen se cuentan como «sin destino» y no tienen RTT en los gráficos.</li>
+      <li>Cada punto es un ciclo. El RTT es el del primer paquete que respondió, tal como lo guarda el extractor.</li>
+    </ul>
+    <h3>Tramos y bloques</h3>
+    <ul>
+      <li><b>Tramo</b>: ciclos consecutivos (con destino) de la misma longitud de camino. Es <b>sostenido</b> si dura al menos la persistencia usada al generar el CSV; si no, es transitorio o parpadeo.</li>
+      <li><b>Bloque</b>: tramos sostenidos de igual longitud unidos cuando solo los separan tramos no sostenidos. <b>Fuera</b> = ciclos del bloque con otra longitud (los de esos tramos intermedios).</li>
+      <li>Los ciclos se asignan a tramos y bloques con las fechas de los CSV. Si el historial no corresponde a esos CSV, el visor avisa de las diferencias.</li>
+    </ul>
+    <h3>Paneles</h3>
+    <ul>
+      <li><b>Principal</b>: toda la serie, con dos carriles (bloques y tramos). Clic en un carril elige el tramo o bloque; la selección se resalta en ámbar.</li>
+      <li><b>Tramos</b>: sin selección muestra todos los tramos, con la línea oscura en la mediana de cada tramo sostenido. Al elegir un tramo (en la lista o con clic en un punto) el panel se ajusta a él, muestra mediana, p5 y p95 y sus estadísticos.</li>
+      <li><b>Bloques</b>: igual, pero por bloque; dentro de un bloque marca en rojo los ciclos «fuera» y, opcionalmente, la mediana de cada tramo sostenido que lo compone.</li>
+      <li>Estadísticos: σ robusta = 1,4826 · MAD. Eje Y: «Completo» muestra de mínimo a máximo (se ven todos los picos); «Recortado» limita el eje a los percentiles 0,5–99,5 de lo visible (los puntos fuera se dibujan en el borde y se cuentan como «fuera del eje Y»); «Manual» permite fijar mínimo y máximo. «Escala log» separa mejor el nivel base cuando hay picos muy altos.</li>
+    </ul>
+    <h3>Interacción</h3>
+    <ul>
+      <li>Selector de fechas (UTC): «Desde / Hasta» fijan el rango visible del panel; «7 d» y «30 d» muestran los últimos días de la medición; «Todo» o doble clic vuelven a ver todo (o a la selección).</li>
+      <li>Arrastrar en un gráfico = zoom al rango. Doble clic = ver todo (o ajustar a la selección). Botones ◀ ▶ = desplazar, − + = zoom.</li>
+      <li>Las listas de la derecha se pueden ordenar haciendo clic en el encabezado de cada columna.</li>
+    </ul>
+  </div>
+</div>
+
+<script>
+"use strict";
+const $ = id => document.getElementById(id);
+const C = {};
+function readColors(){
+  const cs = getComputedStyle(document.documentElement);
+  ["panel","ink","mut","line","grid","pt","pt2","pt3","nodest","med","sel","fuera","b0","b1","b2","b3","b4","b5","k0","k1","k2","k3","k4","k5"].forEach(k => C[k] = cs.getPropertyValue("--"+k).trim());
+}
+const BCOL = k => C["b"+(k % 6)];
+
+/* ---------------- utilidades ---------------- */
+function tsMs(s){ return Date.UTC(+s.slice(0,4), +s.slice(5,7)-1, +s.slice(8,10), +s.slice(11,13), +s.slice(14,16), +s.slice(17,19)||0); }
+const p2 = n => (n<10?"0":"")+n;
+function fmtT(ms){ const d = new Date(ms); return d.getUTCFullYear()+"-"+p2(d.getUTCMonth()+1)+"-"+p2(d.getUTCDate())+" "+p2(d.getUTCHours())+":"+p2(d.getUTCMinutes()); }
+function fmtTs(ms){ return fmtT(ms)+":"+p2(new Date(ms).getUTCSeconds()); }
+const fmtShort = ms => fmtT(ms).slice(2);
+function fmtDur(ms){
+  const m = Math.round(ms/60000);
+  if (m < 60) return m + " min";
+  const h = m/60;
+  if (h < 48) return (Math.round(h*10)/10) + " h";
+  return Math.floor(h/24) + " d " + Math.floor(h%24) + " h";
+}
+const f2 = x => (x==null || !isFinite(x)) ? "–" : x.toFixed(2);
+function quant(a, p){ if (!a.length) return NaN; const i = (a.length-1)*p, lo = Math.floor(i), hi = Math.ceil(i); return a[lo] + (a[hi]-a[lo])*(i-lo); }
+function resumen(vals){
+  if (!vals.length) return null;
+  const a = Float64Array.from(vals).sort();
+  const med = quant(a,.5);
+  const dev = Float64Array.from(a, x => Math.abs(x-med)).sort();
+  let s = 0; for (const x of a) s += x;
+  return {n:a.length, min:a[0], p5:quant(a,.05), med, mean:s/a.length, p95:quant(a,.95), max:a[a.length-1], sig:1.4826*quant(dev,.5)};
+}
+function niceTicks(lo, hi, maxN){
+  const span = hi - lo || 1, raw = span/maxN, mag = Math.pow(10, Math.floor(Math.log10(raw)));
+  const st = [1,2,2.5,5,10].map(m => m*mag).find(s => s >= raw) || 10*mag;
+  const out = []; for (let v = Math.ceil(lo/st)*st; v <= hi + 1e-9; v += st) out.push(+v.toFixed(10));
+  return out;
+}
+function timeTicks(v0, v1, maxN){
+  const span = v1 - v0, H = 3600e3, D = 86400e3;
+  const steps = [5*60e3,15*60e3,H,3*H,6*H,12*H,D,2*D,7*D,14*D,30*D,90*D,180*D,365*D];
+  const st = steps.find(s => span/s <= maxN) || steps[steps.length-1];
+  const out = []; for (let t = Math.ceil(v0/st)*st; t <= v1; t += st) out.push(t);
+  return {out, st};
+}
+function lowerBound(arr, x){ let lo = 0, hi = arr.length; while (lo < hi){ const m = (lo+hi)>>1; if (arr[m] < x) lo = m+1; else hi = m; } return lo; }
+function esc(s){ return String(s).replace(/[&<>]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;"}[c])); }
+
+function esPrivada(ip){
+  if (ip.indexOf(":") >= 0){ const s = ip.toLowerCase(); return s==="::1" || s==="::" || /^fe[89ab]/.test(s) || /^f[cd]/.test(s) || s.indexOf("2001:db8")===0; }
+  const m = ip.match(/^(\d+)\.(\d+)\.(\d+)\.(\d+)$/); if (!m) return false;
+  const a = +m[1], b = +m[2], c = +m[3];
+  return a===0 || a===10 || a===127 || (a===169&&b===254) || (a===172&&b>=16&&b<=31) || (a===192&&b===168) ||
+    (a===192&&b===0&&(c===0||c===2)) || (a===198&&(b===18||b===19)) || (a===198&&b===51&&c===100) || (a===203&&b===0&&c===113) || a>=240;
+}
+const ASN_VACIOS = ["","unknown","na","none","nan","null"];
+const asnValido = a => ASN_VACIOS.indexOf(a.trim().toLowerCase()) < 0;
+
+/* ---------------- estado ---------------- */
+const S = {raw:{h:null,t:null,b:null,g:null,x:null}, names:{h:"",t:"",b:"",g:"",x:""}, D:null, selT:-1, selB:-1, selG:-1,
+  sortT:{k:"id",dir:1}, sortB:{k:"id",dir:1}, sortG:{k:"ini",dir:1}, listT:[], listB:[], listG:[], hover:null};
+const PANELS = {};
+
+/* ---------------- carga de archivos ---------------- */
+function parseCSV(text){
+  const lines = text.split(/\r?\n/);
+  const head = lines[0].split(",").map(s => s.trim());
+  const rows = [];
+  for (let i = 1; i < lines.length; i++){ if (lines[i]) rows.push(lines[i].split(",")); }
+  return {head, rows};
+}
+const leer = file => new Promise((ok,ko) => { const r = new FileReader(); r.onload = () => ok(r.result); r.onerror = ko; r.readAsText(file); });
+function setSlot(id, nid, ok, txt){ $(id).classList.toggle("ok", ok); $(id).querySelector(".st").textContent = ok ? "✓" : "○"; if (txt) $(nid).textContent = txt; }
+async function recibir(files){
+  mensaje("");
+  const avisos = [];
+  for (const f of files){
+    const p = parseCSV(await leer(f));
+    const h = p.head;
+    const esExcl = h.includes("ciclo") && (h.includes("motivo") || h.includes("tramo_n"));
+    if (!p.rows.length && !esExcl){ avisos.push("«"+esc(f.name)+"» no tiene filas de datos."); continue; }
+    if (esExcl){ S.raw.x = p; S.names.x = f.name; setSlot("sX","nX",true,f.name+" · "+p.rows.length+" ciclos excluidos"); }
+    else if (h.includes("rtt_ms") && h.includes("hop")){ S.raw.h = p; S.names.h = f.name; setSlot("sH","nH",true,f.name+" · "+p.rows.length+" filas"); }
+    else if (h.includes("bloque_id") && h.includes("inicio") && h.includes("fin")){ S.raw.b = p; S.names.b = f.name; setSlot("sB","nB",true,f.name+" · "+p.rows.length+" bloques"); }
+    else if (h.includes("inicio") && h.includes("ciclos") && h.includes("sostenido")){ S.raw.t = p; S.names.t = f.name; setSlot("sT","nT",true,f.name+" · "+p.rows.length+" tramos"); }
+    else if (h.includes("grupo_id") && h.includes("tipo_degradacion") && h.includes("start_ts")){ S.raw.g = p; S.names.g = f.name; setSlot("sG","nG",true,f.name+" · "+p.rows.length+" grupos"); }
+    else avisos.push("«"+esc(f.name)+"» no se reconoce: se esperaba el historial (timestamp,hop,ip,asn,rtt_ms), tramos_longitud (inicio,longitud,ciclos,sostenido), segmentos_caracterizados_agrupados (grupo_id,start_ts,…,tipo_degradacion), ciclos_excluidos (ciclo,motivo,…) o bloques_longitud (bloque_id,longitud,inicio,fin,…).");
+  }
+  if (avisos.length) mensaje(avisos.join("<br>"));
+  if (S.raw.h) construir();
+}
+function mensaje(t){ $("msg").innerHTML = t ? '<div class="warn">'+t+'</div>' : ""; }
+[["fH"],["fT"],["fB"],["fG"],["fX"]].forEach(([id]) => $(id).addEventListener("change", e => { recibir(e.target.files); e.target.value = ""; }));
+["dragover","dragenter"].forEach(ev => document.addEventListener(ev, e => { e.preventDefault(); $("files").classList.add("over"); }));
+["dragleave","drop"].forEach(ev => document.addEventListener(ev, e => { e.preventDefault(); $("files").classList.remove("over"); }));
+document.addEventListener("drop", e => { if (e.dataTransfer && e.dataTransfer.files.length) recibir(e.dataTransfer.files); });
+
+/* ---------------- construcción de datos ---------------- */
+function construir(){
+  const warns = [];
+  const p = S.raw.h, ih = {};
+  p.head.forEach((h,i) => ih[h] = i);
+  for (const c of ["timestamp","hop","ip","asn","rtt_ms"]) if (!(c in ih)) warns.push("el historial no tiene la columna «"+c+"».");
+  if (warns.length){ mensaje(warns.join("<br>")); return; }
+
+  // ciclos: se conserva el último salto (mayor hop) de cada uno, como hace verificar_caminos.py
+  const byTs = new Map();
+  for (const r of p.rows){
+    const ip = (r[ih.ip]||"").trim(); if (!ip) continue;
+    const hop = parseInt(r[ih.hop], 10); if (!isFinite(hop)) continue;
+    const ts = r[ih.timestamp].trim();
+    let c = byTs.get(ts);
+    if (!c){ c = {ts, hop:-1, ip:"", asn:"", rtt:NaN}; byTs.set(ts, c); }
+    if (hop >= c.hop){
+      const v = parseFloat(r[ih.rtt_ms]);
+      c.hop = hop; c.ip = ip; c.asn = (r[ih.asn]||"").trim(); c.rtt = isFinite(v) ? v : NaN;
+    }
+  }
+  const cyc = Array.from(byTs.values()).sort((a,b) => a.ts < b.ts ? -1 : a.ts > b.ts ? 1 : 0);
+  if (!cyc.length){ mensaje("El historial no tiene ciclos con respuesta."); return; }
+
+  // destino alcanzado (misma regla que clasificar_destino de verificar_caminos.py)
+  const nAll = cyc.length, cntIp = new Map(), cntAsn = new Map();
+  for (const c of cyc){
+    if (esPrivada(c.ip)) continue;
+    cntIp.set(c.ip, (cntIp.get(c.ip)||0) + 1);
+    if (asnValido(c.asn)) cntAsn.set(c.asn, (cntAsn.get(c.asn)||0) + 1);
+  }
+  let asnModal = null, best = 0;
+  for (const [a,n] of cntAsn) if (n > best){ best = n; asnModal = a; }
+  const frecuentes = new Set();
+  for (const [ip,n] of cntIp){
+    if (n < Math.max(1, 0.02*nAll)) continue;
+    const m = new Map();
+    for (const c of cyc) if (c.ip === ip && asnValido(c.asn)) m.set(c.asn, (m.get(c.asn)||0) + 1);
+    let a = null, bb = 0; for (const [k,v] of m) if (v > bb){ bb = v; a = k; }
+    if (asnModal === null || a === null || a === asnModal) frecuentes.add(ip);
+  }
+  let ok = cyc.map(c => !esPrivada(c.ip) && ((asnModal !== null && c.asn === asnModal) || frecuentes.has(c.ip)));
+  if (!ok.some(x => x)) ok = ok.map(() => true);
+  const tss = cyc.filter((c,i) => ok[i]);
+  const nd = cyc.filter((c,i) => !ok[i]).map(c => tsMs(c.ts));
+
+  const n = tss.length;
+  const tT = new Float64Array(n), tV = new Float64Array(n), tL = new Int16Array(n);
+  const idx = new Map();
+  tss.forEach((c,i) => { tT[i] = tsMs(c.ts); tV[i] = c.rtt; tL[i] = c.hop; idx.set(c.ts, i); });
+  // serie de puntos con RTT
+  let np = 0; for (let i = 0; i < n; i++) if (isFinite(tV[i])) np++;
+  const PT = new Float64Array(np), PV = new Float64Array(np), PI = new Int32Array(np);
+  for (let i = 0, k = 0; i < n; i++) if (isFinite(tV[i])){ PT[k] = tT[i]; PV[k] = tV[i]; PI[k] = i; k++; }
+  // longitud modal y cadencia
+  const cl = new Map(); for (let i = 0; i < n; i++) cl.set(tL[i], (cl.get(tL[i])||0) + 1);
+  let modal = -1; best = 0; for (const [l,c] of cl) if (c > best){ best = c; modal = l; }
+  const dts = []; for (let i = 1; i < n; i++) dts.push(tT[i]-tT[i-1]);
+  dts.sort((a,b) => a-b);
+  const cad = dts.length ? dts[dts.length>>1] : 900e3;
+  const ipTop = Array.from(cntIp.entries()).sort((a,b) => b[1]-a[1])[0];
+
+  const D = {tss, tT, tV, tL, PT, PV, PI, n, np, nd, modal, cad, tmin:tT[0], tmax:tT[n-1], idx, nAll,
+    asnModal, ipTop: ipTop ? ipTop[0] : "", ipTopPct: ipTop ? 100*ipTop[1]/nAll : 0,
+    trOf:new Int32Array(n).fill(-1), blOf:new Int32Array(n).fill(-1), tramos:[], bloques:[], grOf:new Int32Array(n).fill(-1), grupos:[], tipoExtra:{}};
+  S.D = D;
+  mapear(warns); mapearGrupos(warns);
+  S.selT = -1; S.selB = -1; S.selG = -1;
+  // cabecera
+  const m = (S.names.h+S.names.t+S.names.b).match(/measurement(\d+)_probe(\d+)/);
+  $("hM").textContent = m ? m[1] : "–"; $("hP").textContent = m ? m[2] : "–";
+  $("hN").textContent = n; $("hRange").textContent = fmtT(D.tmin)+" → "+fmtT(D.tmax);
+  $("hDest").innerHTML = "destino: <b>"+(asnModal ? "AS"+esc(asnModal) : "?")+"</b> · "+esc(D.ipTop)+" ("+D.ipTopPct.toFixed(1)+" %) · sin destino <b>"+nd.length+"</b>";
+  $("hCad").innerHTML = "cadencia: <b>"+Math.round(cad/1000)+" s</b> · longitud modal <b>"+modal+"</b>";
+  mensaje(warns.join("<br>"));
+  for (const k of ["p1","p2","p3","p4"]) resetView(PANELS[k], true);
+  renderListas(); renderTodo();
+}
+
+function mapear(warns){
+  const D = S.D; D.trOf.fill(-1); D.blOf.fill(-1); D.tramos = []; D.bloques = [];
+  const T = S.raw.t, B = S.raw.b;
+  if (T){
+    const ic = {}; T.head.forEach((h,i) => ic[h] = i);
+    let cursor = null, mis = 0, lenMis = 0, fuera = 0;
+    T.rows.forEach((r, k) => {
+      const ini = (r[ic.inicio]||"").trim(), nC = parseInt(r[ic.ciclos], 10), lg = parseInt(r[ic.longitud], 10);
+      let i0 = D.idx.get(ini);
+      if (i0 === undefined){ mis++; if (cursor === null) return; i0 = cursor; }
+      else if (cursor !== null && i0 !== cursor) mis++;
+      let i1 = i0 + nC - 1; if (i1 > D.n-1){ i1 = D.n-1; fuera++; }
+      cursor = i1 + 1;
+      const tr = {id:k+1, i0, i1, n:i1-i0+1, len:lg, sost:(r[ic.sostenido]||"").trim()==="1"};
+      tr.ini = D.tT[i0]; tr.fin = D.tT[i1]; tr.modal = lg === D.modal;
+      let bad = 0; for (let i = i0; i <= i1; i++){ D.trOf[i] = D.tramos.length; if (D.tL[i] !== lg) bad++; }
+      if (bad) lenMis++;
+      const vals = []; for (let i = i0; i <= i1; i++) if (isFinite(D.tV[i])) vals.push(D.tV[i]);
+      tr.st = resumen(vals);
+      D.tramos.push(tr);
+    });
+    if (mis || lenMis || fuera) warns.push("Los tramos no coinciden del todo con el historial ("+mis+" inicios que no encajan, "+lenMis+" tramos con ciclos de otra longitud, "+fuera+" fuera de rango): ¿es el mismo historial y la misma corrida de verificar_caminos?");
+  }
+  if (B){
+    const ic = {}; B.head.forEach((h,i) => ic[h] = i);
+    let mis = 0, cnt = 0;
+    B.rows.forEach((r, k) => {
+      const a = D.idx.get((r[ic.inicio]||"").trim()), b = D.idx.get((r[ic.fin]||"").trim());
+      if (a === undefined || b === undefined){ mis++; return; }
+      const lg = parseInt(r[ic.longitud], 10);
+      const bl = {id:parseInt(r[ic.bloque_id],10) || (k+1), i0:a, i1:b, n:b-a+1, len:lg, modal:lg === D.modal,
+        ntr:parseInt(r[ic.tramos_sostenidos],10) || 0};
+      bl.ini = D.tT[a]; bl.fin = D.tT[b];
+      let fuera = 0; const vals = [];
+      for (let i = a; i <= b; i++){ D.blOf[i] = D.bloques.length; if (D.tL[i] !== lg) fuera++; if (isFinite(D.tV[i])) vals.push(D.tV[i]); }
+      bl.fuera = fuera; bl.st = resumen(vals);
+      const nc = parseInt(r[ic.ciclos], 10); if (isFinite(nc) && nc !== bl.n) cnt++;
+      D.bloques.push(bl);
+    });
+    if (mis || cnt) warns.push("Los bloques no coinciden del todo con el historial ("+mis+" bloques con fechas que no están en el historial, "+cnt+" con distinta cantidad de ciclos).");
+  }
+}
+
+/* ---------------- grupos HDP-HMM ---------------- */
+const TIPO_IDX = {regimen_base:0, variacion_normal:1, degradacion_moderada_sostenida:2, degradacion_severa_sostenida:3};
+function tipoCol(tipo){
+  const D = S.D; let k = TIPO_IDX[tipo];
+  if (k === undefined){ if (D.tipoExtra[tipo] === undefined) D.tipoExtra[tipo] = 4 + Object.keys(D.tipoExtra).length % 2; k = D.tipoExtra[tipo]; }
+  return C["k"+k];
+}
+const TIPO_CORTO = {regimen_base:"base", variacion_normal:"normal", degradacion_moderada_sostenida:"moderada", degradacion_severa_sostenida:"severa"};
+const tipoLargo = t => t.replace(/_/g, " ");
+const tipoCorto = t => TIPO_CORTO[t] || tipoLargo(t);
+const listaIds = a => a.length > 12 ? a.slice(0,12).join(", ")+" … (+"+(a.length-12)+")" : a.join(", ");
+function mapearGrupos(warns){
+  const D = S.D, G = S.raw.g; D.grOf.fill(-1); D.grupos = []; if (!G) return;
+  const ic = {}; G.head.forEach((h,i) => ic[h] = i);
+  for (const c of ["start_ts","end_ts","n_ciclos","duracion_minutos","tipo_degradacion"])
+    if (!(c in ic)){ warns.push("segmentos_caracterizados: falta la columna «"+c+"»."); return; }
+  // ciclos excluidos por verificar_caminos (sin_destino / parpadeo / transitorio): el HDP-HMM no los usa, el historial si los cuenta
+  const X = S.raw.x; const exc = new Set();
+  if (X){ const ix = X.head.indexOf("ciclo"); if (ix >= 0) X.rows.forEach(r => { const t = (r[ix]||"").trim(); if (t) exc.add(t); }); }
+  const hayX = !!X;
+  const cm = D.cad/60000; let durBad = 0, cntBad = 0, nofit = 0; const rat = [], mpc = [], idsDur = [], idsCnt = [];
+  G.rows.forEach((r, k) => {
+    const sTs = (r[ic.start_ts]||"").trim(), eTs = (r[ic.end_ts]||"").trim(), ini = tsMs(sTs), fin = tsMs(eTs);
+    if (!isFinite(ini) || !isFinite(fin)) return;
+    const gr = {id:ic.grupo_id !== undefined ? (parseInt(r[ic.grupo_id],10) || k+1) : k+1, ini, fin, startTs:sTs, endTs:eTs,
+      n:parseInt(r[ic.n_ciclos],10), dur:parseFloat(r[ic.duracion_minutos]), tipo:(r[ic.tipo_degradacion]||"").trim()};
+    const i0 = lowerBound(D.tT, ini), i1 = lowerBound(D.tT, fin + 1) - 1;
+    gr.i0 = i0; gr.i1 = i1; gr.nh = Math.max(0, i1 - i0 + 1);
+    const vals = [];
+    let ne = 0;
+    for (let i = i0; i <= i1; i++){ D.grOf[i] = D.grupos.length; if (isFinite(D.tV[i])) vals.push(D.tV[i]); if (hayX && exc.has(D.tss[i].ts)) ne++; }
+    gr.ne = ne; gr.nexp = gr.nh - ne;
+    gr.st = resumen(vals);
+    if (!gr.nh) nofit++;
+    const span = (fin - ini)/60000 + cm;
+    if (span > 0 && gr.dur > 0){
+      rat.push(gr.dur/span);
+      if (gr.n > 0) mpc.push(gr.dur/gr.n);
+      const malContra = ref => Math.abs(gr.dur - ref) > Math.max(0.25*ref, 2*cm);
+      // con el archivo de excluidos, tambien vale la duracion nominal n_ciclos_esperados * cadencia
+      const bad = malContra(span) && (!hayX || malContra(gr.nexp*cm));
+      if (bad){ durBad++; idsDur.push(gr.id); }
+    }
+    const esp = hayX ? gr.nexp : gr.nh;
+    if (esp && Math.abs(gr.n - esp) > Math.max(2, 0.05*esp)){ cntBad++; idsCnt.push(gr.id); }
+    D.grupos.push(gr);
+  });
+  D.grupos.sort((a,b) => a.ini - b.ini);
+  D.grOf.fill(-1); D.grupos.forEach((gr, k) => { for (let i = gr.i0; i <= gr.i1; i++) D.grOf[i] = k; });
+  const med = a => { const q = Float64Array.from(a).sort(); return q.length ? q[q.length>>1] : NaN; };
+  if (durBad) warns.push("En «"+esc(S.names.g)+"», duracion_minutos no coincide con fin − inicio en "+durBad+" de "+D.grupos.length+" grupos (mediana de duracion_minutos / (fin − inicio) = "+med(rat).toFixed(2)+"). La duración declarada equivale a "+med(mpc).toFixed(1)+" min por ciclo, pero la cadencia del historial es "+Math.round(D.cad/1000)+" s ("+(cm).toFixed(1)+" min): conviene revisar cómo el script calcula la duración."+(hayX ? "" : " (Carga ciclos_excluidos para descontar los ciclos que el script no usa.)")+" Grupos: "+listaIds(idsDur)+".");
+  if (cntBad) warns.push("En «"+esc(S.names.g)+"», n_ciclos difiere de los ciclos del historial dentro de [start_ts, end_ts]"+(hayX ? " (ya descontados los ciclos excluidos de «"+esc(S.names.x)+"»)" : " (sin descontar ciclos excluidos: carga ciclos_excluidos_…csv)")+" en "+cntBad+" grupos (tolerancia 5 %). Grupos: "+listaIds(idsCnt)+".");
+  if (nofit) warns.push(nofit+" grupos no tienen ciclos del historial en su rango: ¿es el mismo historial?");
+}
+
+/* ---------------- paneles ---------------- */
+function mkPanel(id, kind, h){
+  const root = $(id), cv = root.querySelector("canvas");
+  const P = {id, kind, root, cv, h, view:{v0:0,v1:1}, cur:root.querySelector(".cur"), box:root.querySelector(".selbox"), geo:null, y:null};
+  PANELS[id] = P;
+  cv.height = h;
+  root.querySelectorAll("[data-a]").forEach(b => b.addEventListener("click", () => accion(P, b.dataset.a)));
+  root.querySelector(".toolbar").insertAdjacentHTML("afterend",
+    '<div class="toolbar rng">'+
+    '<div class="grp"><label>Eje Y</label><select class="ymode"><option value="full">Completo (mín–máx)</option><option value="clip">Recortado p0,5–p99,5</option><option value="man">Manual</option></select>'+
+    '<span class="man" style="display:none"><input type="number" class="ymin" step="any" title="mínimo (ms)"> – <input type="number" class="ymax" step="any" title="máximo (ms)"> ms</span>'+
+    '<label><input type="checkbox" class="ylog"> Escala log</label></div>'+
+    '<div class="grp"><label>Desde (UTC)</label><input type="datetime-local" class="dfrom"><label>Hasta</label><input type="datetime-local" class="dto">'+
+    '<button class="b dpre" data-d="7">7 d</button><button class="b dpre" data-d="30">30 d</button><button class="b dpre" data-d="0">Todo</button></div></div>');
+  const ym = root.querySelector(".ymode"), man = root.querySelector(".man");
+  ym.addEventListener("change", () => {
+    if (ym.value === "man"){
+      if (P.y){ root.querySelector(".ymin").value = (+P.y[0].toFixed(2)); root.querySelector(".ymax").value = (+P.y[1].toFixed(2)); }
+    }
+    man.style.display = ym.value === "man" ? "inline" : "none"; draw(P);
+  });
+  root.querySelector(".ylog").addEventListener("change", () => draw(P));
+  root.querySelector(".ymin").addEventListener("change", () => draw(P));
+  root.querySelector(".ymax").addEventListener("change", () => draw(P));
+  const aplicarFechas = () => {
+    const f = Date.parse(root.querySelector(".dfrom").value + ":00Z"), t = Date.parse(root.querySelector(".dto").value + ":00Z");
+    if (isFinite(f) && isFinite(t) && t > f) setView(P, f, t);
+  };
+  root.querySelector(".dfrom").addEventListener("change", aplicarFechas);
+  root.querySelector(".dto").addEventListener("change", aplicarFechas);
+  root.querySelectorAll(".dpre").forEach(b => b.addEventListener("click", () => {
+    const D = S.D; if (!D) return; const d = +b.dataset.d;
+    if (!d) resetView(P); else setView(P, D.tmax - d*86400e3, D.tmax + D.cad);
+  }));
+  bindMouse(P);
+  return P;
+}
+function accion(P, a){
+  const D = S.D; if (!D) return;
+  const w = P.view.v1 - P.view.v0, m = (P.view.v0 + P.view.v1)/2;
+  if (a === "out") setView(P, m - w, m + w);
+  else if (a === "in") setView(P, m - w/4, m + w/4);
+  else if (a === "l") setView(P, P.view.v0 - w*.4, P.view.v1 - w*.4, true);
+  else if (a === "r") setView(P, P.view.v0 + w*.4, P.view.v1 + w*.4, true);
+  else if (a === "fit") resetView(P);
+  else if (a === "clear"){ if (P.kind === "tr") S.selT = -1; else if (P.kind === "bl") S.selB = -1; else S.selG = -1; resetView(P); renderTodo(); renderListas(); }
+  else if (a === "prev" || a === "next"){
+    const list = P.kind === "tr" ? S.listT : P.kind === "bl" ? S.listB : S.listG; if (!list.length) return;
+    const cur = P.kind === "tr" ? S.selT : P.kind === "bl" ? S.selB : S.selG;
+    let pos = list.indexOf(cur);
+    pos = pos < 0 ? (a === "next" ? 0 : list.length-1) : (pos + (a === "next" ? 1 : -1) + list.length) % list.length;
+    if (P.kind === "tr") selTramo(list[pos], true); else if (P.kind === "bl") selBloque(list[pos], true); else selGrupo(list[pos], true);
+  }
+}
+function setView(P, v0, v1, keepW){
+  const D = S.D; if (!D) return;
+  const lo = D.tmin - D.cad, hi = D.tmax + D.cad;
+  let w = v1 - v0;
+  if (w < D.cad*4) { const m = (v0+v1)/2; v0 = m - D.cad*2; v1 = m + D.cad*2; w = v1 - v0; }
+  if (w > hi - lo){ v0 = lo; v1 = hi; }
+  else { if (v0 < lo){ v0 = lo; v1 = lo + w; } if (v1 > hi){ v1 = hi; v0 = hi - w; } }
+  P.view = {v0, v1}; draw(P);
+}
+function itemSel(P){
+  const D = S.D; if (!D) return null;
+  if (P.kind === "tr") return S.selT >= 0 ? D.tramos[S.selT] : null;
+  if (P.kind === "bl") return S.selB >= 0 ? D.bloques[S.selB] : null;
+  if (P.kind === "gr") return S.selG >= 0 ? D.grupos[S.selG] : null;
+  return null;
+}
+function resetView(P, silent){
+  const D = S.D; if (!D) return;
+  const it = itemSel(P);
+  if (it){ const pad = Math.max((it.fin - it.ini)*0.05, D.cad*2); P.view = {v0:it.ini - pad, v1:it.fin + pad}; }
+  else P.view = {v0:D.tmin - D.cad, v1:D.tmax + D.cad};
+  if (!silent) draw(P);
+}
+
+/* geometría */
+function geom(P){
+  const w = P.cv.parentElement.clientWidth - 16, lanes = P.kind === "main" && $("cLane").checked;
+  const g = {W:w, H:P.h, L:58, R:12, T:10, B:lanes ? 22 + 15*(2 + (S.D && S.D.grupos.length ? 1 : 0)) : 24, lanes};
+  g.pw = Math.max(50, g.W - g.L - g.R); g.ph = g.H - g.T - g.B;
+  return g;
+}
+const xOf = (P, g, t) => g.L + (t - P.view.v0)/(P.view.v1 - P.view.v0)*g.pw;
+const tOf = (P, g, x) => P.view.v0 + (x - g.L)/g.pw*(P.view.v1 - P.view.v0);
+
+function yf(P, v){   // fraccion 0..1 desde abajo
+  const y0 = P.y[0], y1 = P.y[1];
+  if (P.ylog){ const a = Math.log(y0), b = Math.log(y1); return (Math.log(Math.max(v, y0*1e-4)) - a)/(b - a); }
+  return (v - y0)/(y1 - y0);
+}
+function visRange(P){ const D = S.D; return [lowerBound(D.PT, P.view.v0), lowerBound(D.PT, P.view.v1)]; }
+function yRange(P, a, b, mode, fromSel){
+  const clip = mode === "clip";
+  const D = S.D, arr = [];
+  for (let k = a; k < b; k++){
+    if (fromSel){ const i = D.PI[k]; if (i < fromSel.i0 || i > fromSel.i1) continue; }
+    arr.push(D.PV[k]);
+  }
+  if (!arr.length) return P.ylog ? [1, 10] : [0, 1];
+  const s = Float64Array.from(arr).sort();
+  let lo = clip ? quant(s,.005) : s[0], hi = clip ? quant(s,.995) : s[s.length-1];
+  if (hi - lo < 0.2){ const m = (hi+lo)/2; lo = m - .1; hi = m + .1; }
+  if (P.ylog){ lo = Math.max(lo, 0.01); return [lo*0.92, hi*1.08]; }
+  const pad = (hi - lo)*.08; return [Math.max(0, lo - pad), hi + pad];
+}
+
+/* dibujo de la serie: fn(i) -> color o null (se omite) */
+function drawSeries(ctx, P, g, a, b, fn, alpha, big){
+  const D = S.D, y0 = P.y[0], y1 = P.y[1], gapMs = D.cad*3.5;
+  const yy = v => { const t = g.T + (1 - yf(P, v))*g.ph; return t < g.T ? g.T : t > g.T+g.ph ? g.T+g.ph : t; };
+  ctx.save(); ctx.globalAlpha = alpha;
+  ctx.beginPath(); ctx.rect(g.L, g.T, g.pw, g.ph); ctx.clip();
+  const nPts = b - a;
+  if (nPts > g.pw*1.6){
+    const mn = new Float64Array(g.pw+1).fill(Infinity), mx = new Float64Array(g.pw+1).fill(-Infinity), cc = new Array(g.pw+1);
+    for (let k = a; k < b; k++){
+      const col = fn(D.PI[k]); if (!col) continue;
+      let x = Math.floor(xOf(P, g, D.PT[k]) - g.L); if (x < 0 || x > g.pw) continue;
+      const v = D.PV[k]; if (v < mn[x]) mn[x] = v; if (v > mx[x]) mx[x] = v; if (!cc[x]) cc[x] = col;
+    }
+    ctx.lineWidth = 1;
+    for (let x = 0; x <= g.pw; x++){
+      if (mn[x] === Infinity) continue;
+      ctx.strokeStyle = cc[x]; const ya = yy(mn[x]), yb = yy(mx[x]);
+      ctx.beginPath(); ctx.moveTo(g.L + x + .5, ya); ctx.lineTo(g.L + x + .5, Math.min(yb, ya - 1.5)); ctx.stroke();
+    }
+  } else {
+    let px = 0, py = 0, pc = null, pt = -Infinity;
+    ctx.lineWidth = 1;
+    const r = nPts < 500 ? 2 : 1.4;
+    for (let k = a; k < b; k++){
+      const col = fn(D.PI[k]);
+      if (!col){ pc = null; continue; }
+      const x = xOf(P, g, D.PT[k]), y = yy(D.PV[k]);
+      if (pc && D.PT[k] - pt <= gapMs){ ctx.strokeStyle = col; ctx.globalAlpha = alpha*.45; ctx.beginPath(); ctx.moveTo(px, py); ctx.lineTo(x, y); ctx.stroke(); ctx.globalAlpha = alpha; }
+      ctx.fillStyle = col; ctx.beginPath(); ctx.arc(x, y, r, 0, 6.2832); ctx.fill();
+      px = x; py = y; pc = col; pt = D.PT[k];
+    }
+  }
+  ctx.restore();
+}
+function hline(ctx, P, g, t0, t1, v, color, w, dash){
+  const y0 = P.y[0], y1 = P.y[1];
+  const xa = Math.max(g.L, xOf(P, g, t0)), xb = Math.min(g.L+g.pw, xOf(P, g, t1));
+  if (xb < g.L || xa > g.L+g.pw || xb < xa) return;
+  const y = g.T + (1 - yf(P, v))*g.ph;
+  if (!(y >= g.T && y <= g.T+g.ph)) return;
+  ctx.save(); ctx.strokeStyle = color; ctx.lineWidth = w; if (dash) ctx.setLineDash(dash);
+  ctx.beginPath(); ctx.moveTo(xa, y); ctx.lineTo(Math.max(xb, xa+2), y); ctx.stroke(); ctx.restore();
+}
+function axes(ctx, P, g){
+  ctx.save(); ctx.font = "11px system-ui,sans-serif"; ctx.fillStyle = C.mut; ctx.strokeStyle = C.grid; ctx.lineWidth = 1;
+  let yt;
+  if (P.ylog){ yt = []; for (let e = Math.floor(Math.log10(P.y[0])) - 1; e <= Math.ceil(Math.log10(P.y[1])); e++) for (const m of [1,2,3,5,7]){ const v = m*Math.pow(10,e); if (v >= P.y[0] && v <= P.y[1]) yt.push(+v.toFixed(6)); } }
+  else yt = niceTicks(P.y[0], P.y[1], 6);
+  for (const v of yt){
+    const y = Math.round(g.T + (1 - yf(P, v))*g.ph) + .5;
+    ctx.beginPath(); ctx.moveTo(g.L, y); ctx.lineTo(g.L+g.pw, y); ctx.stroke();
+    ctx.textAlign = "right"; ctx.textBaseline = "middle"; ctx.fillText((+v.toFixed(2)).toString(), g.L-6, y);
+  }
+  const tk = timeTicks(P.view.v0, P.view.v1, Math.max(3, Math.floor(g.pw/95)));
+  ctx.textAlign = "center"; ctx.textBaseline = "top";
+  for (const t of tk.out){
+    const x = Math.round(xOf(P, g, t)) + .5;
+    ctx.beginPath(); ctx.moveTo(x, g.T); ctx.lineTo(x, g.T+g.ph); ctx.stroke();
+    const d = new Date(t), lab = tk.st < 86400e3 ? p2(d.getUTCMonth()+1)+"-"+p2(d.getUTCDate())+" "+p2(d.getUTCHours())+":"+p2(d.getUTCMinutes()) : fmtT(t).slice(0,10);
+    ctx.fillText(lab, x, g.T+g.ph+4);
+  }
+  ctx.strokeStyle = C.line; ctx.strokeRect(g.L+.5, g.T+.5, g.pw, g.ph);
+  ctx.translate(11, g.T + g.ph/2); ctx.rotate(-Math.PI/2); ctx.textAlign = "center"; ctx.fillText("RTT (ms)", 0, 0);
+  ctx.restore();
+}
+function band(ctx, P, g, t0, t1, color, alpha){
+  const xa = Math.max(g.L, xOf(P, g, t0)), xb = Math.min(g.L+g.pw, xOf(P, g, t1));
+  if (xb < g.L || xa > g.L+g.pw) return;
+  ctx.save(); ctx.globalAlpha = alpha; ctx.fillStyle = color; ctx.fillRect(xa, g.T, Math.max(1.5, xb-xa), g.ph); ctx.restore();
+}
+const clsColor = tr => !tr ? C.pt3 : !tr.sost ? C.pt3 : tr.modal ? C.pt : C.pt2;
+
+function draw(P){
+  const D = S.D, cv = P.cv; readColors();
+  if (P.kind === "main") P.h = $("cLane").checked ? 330 + (D && D.grupos.length ? 15 : 0) : 300;
+  const dpr = window.devicePixelRatio || 1, g = geom(P);
+  cv.style.width = g.W + "px"; cv.style.height = g.H + "px"; cv.width = Math.round(g.W*dpr); cv.height = Math.round(g.H*dpr);
+  const ctx = cv.getContext("2d"); ctx.setTransform(dpr,0,0,dpr,0,0); ctx.clearRect(0,0,g.W,g.H);
+  P.geo = g;
+  if (!D){ return; }
+  if ((P.kind === "tr" && !D.tramos.length) || (P.kind === "bl" && !D.bloques.length) || (P.kind === "gr" && !D.grupos.length)) return;
+  const [a, b] = visRange(P), mode = P.root.querySelector(".ymode").value;
+  const it = itemSel(P);
+  P.ylog = P.root.querySelector(".ylog").checked;
+  P.y = yRange(P, a, b, mode, it && P.view.v1 - P.view.v0 < (it.fin - it.ini)*3 ? it : null);
+  if (mode === "man"){
+    let lo = parseFloat(P.root.querySelector(".ymin").value), hi = parseFloat(P.root.querySelector(".ymax").value);
+    if (P.ylog && isFinite(lo)) lo = Math.max(lo, 0.01);
+    if (isFinite(lo) && isFinite(hi) && hi > lo) P.y = [lo, hi];
+  }
+  P.nout = 0; for (let k = a; k < b; k++){ const v = D.PV[k]; if (v > P.y[1] || v < P.y[0]) P.nout++; }
+  syncRange(P);
+  axes(ctx, P, g);
+
+  if (P.kind === "main"){
+    // selección
+    if (S.selB >= 0) band(ctx, P, g, D.bloques[S.selB].ini, D.bloques[S.selB].fin, C.pt, .07);
+    if (S.selT >= 0) band(ctx, P, g, D.tramos[S.selT].ini, D.tramos[S.selT].fin, C.sel, .28);
+    drawSeries(ctx, P, g, a, b, i => D.tramos.length ? clsColor(D.tramos[D.trOf[i]]) : C.pt, 1);
+    if ($("cND").checked){
+      ctx.save(); ctx.fillStyle = C.nodest; ctx.globalAlpha = .75;
+      for (const t of D.nd){ if (t < P.view.v0 || t > P.view.v1) continue; const x = xOf(P, g, t); ctx.fillRect(x-.5, g.T+g.ph-6, 1.5, 6); }
+      ctx.restore();
+    }
+    if (g.lanes) drawLanes(ctx, P, g);
+    $("cnt1").textContent = cntTxt(P, b-a);
+  } else if (P.kind === "tr"){
+    if (it){
+      band(ctx, P, g, it.ini, it.fin, C.sel, .12);
+      drawSeries(ctx, P, g, a, b, i => D.trOf[i] === S.selT ? null : C.pt3, .28);
+      drawSeries(ctx, P, g, a, b, i => D.trOf[i] === S.selT ? clsColor(it) : null, 1);
+      if (it.st){
+        hline(ctx, P, g, it.ini, it.fin, it.st.p5, C.mut, 1, [4,3]); hline(ctx, P, g, it.ini, it.fin, it.st.p95, C.mut, 1, [4,3]);
+        hline(ctx, P, g, it.ini, it.fin, it.st.med, C.med, 2.5);
+      }
+    } else {
+      drawSeries(ctx, P, g, a, b, i => clsColor(D.tramos[D.trOf[i]]), 1);
+      for (const tr of D.tramos) if (tr.sost && tr.st && tr.fin >= P.view.v0 && tr.ini <= P.view.v1) hline(ctx, P, g, tr.ini, tr.fin, tr.st.med, C.med, 2.2);
+    }
+    $("cnt2").textContent = cntTxt(P, b-a);
+  } else if (P.kind === "bl"){
+    const tin = $("cTrIn").checked;
+    if (it){
+      band(ctx, P, g, it.ini, it.fin, C.pt, .06);
+      drawSeries(ctx, P, g, a, b, i => D.blOf[i] === S.selB ? null : C.pt3, .28);
+      drawSeries(ctx, P, g, a, b, i => D.blOf[i] === S.selB && D.tL[i] === it.len ? C.pt : null, 1);
+      drawSeries(ctx, P, g, a, b, i => D.blOf[i] === S.selB && D.tL[i] !== it.len ? C.fuera : null, 1);
+      if (tin) for (const tr of D.tramos) if (tr.sost && tr.st && tr.i0 >= it.i0 && tr.i1 <= it.i1) hline(ctx, P, g, tr.ini, tr.fin, tr.st.med, C.mut, 1.6, [5,3]);
+      if (it.st){ hline(ctx, P, g, it.ini, it.fin, it.st.p5, C.mut, 1, [2,3]); hline(ctx, P, g, it.ini, it.fin, it.st.p95, C.mut, 1, [2,3]); hline(ctx, P, g, it.ini, it.fin, it.st.med, C.med, 2.5); }
+    } else {
+      drawSeries(ctx, P, g, a, b, i => D.blOf[i] < 0 ? C.pt3 : BCOL(D.blOf[i]), 1);
+      for (const bl of D.bloques) if (bl.st && bl.fin >= P.view.v0 && bl.ini <= P.view.v1) hline(ctx, P, g, bl.ini, bl.fin, bl.st.med, C.med, 2.4);
+    }
+    $("cnt3").textContent = cntTxt(P, b-a);
+  } else {
+    for (const gr of D.grupos) if (gr.fin >= P.view.v0 && gr.ini <= P.view.v1)
+      band(ctx, P, g, gr.ini, gr.fin, tipoCol(gr.tipo), it ? (gr === it ? .30 : .07) : .16);
+    if (it){
+      drawSeries(ctx, P, g, a, b, i => D.grOf[i] === S.selG ? null : C.pt3, .28);
+      drawSeries(ctx, P, g, a, b, i => D.grOf[i] === S.selG ? tipoCol(it.tipo) : null, 1);
+      if (it.st){ hline(ctx, P, g, it.ini, it.fin, it.st.p5, C.mut, 1, [4,3]); hline(ctx, P, g, it.ini, it.fin, it.st.p95, C.mut, 1, [4,3]); hline(ctx, P, g, it.ini, it.fin, it.st.med, C.med, 2.5); }
+    } else {
+      drawSeries(ctx, P, g, a, b, i => D.grOf[i] < 0 ? C.pt3 : tipoCol(D.grupos[D.grOf[i]].tipo), 1);
+      for (const gr of D.grupos) if (gr.st && gr.fin >= P.view.v0 && gr.ini <= P.view.v1) hline(ctx, P, g, gr.ini, gr.fin, gr.st.med, C.med, 2.2);
+    }
+    $("cnt4").textContent = cntTxt(P, b-a);
+  }
+}
+function cntTxt(P, n){ return n+" ciclos en vista"+(P.nout ? " · "+P.nout+" fuera del eje Y" : ""); }
+const isoMin = ms => new Date(ms).toISOString().slice(0,16);
+function syncRange(P){
+  const D = S.D, f = P.root.querySelector(".dfrom"), t = P.root.querySelector(".dto");
+  f.min = t.min = isoMin(D.tmin); f.max = t.max = isoMin(D.tmax);
+  if (document.activeElement === f || document.activeElement === t) return;
+  f.value = isoMin(Math.max(P.view.v0, D.tmin)); t.value = isoMin(Math.min(P.view.v1, D.tmax));
+}
+function drawLanes(ctx, P, g){
+  const D = S.D, yb = g.T + g.ph + 20, yt = yb + 15, h = 11;
+  ctx.save(); ctx.font = "10px system-ui,sans-serif"; ctx.textBaseline = "middle"; ctx.fillStyle = C.mut; ctx.textAlign = "right";
+  const yg = yt + 15, ng = D.grupos.length > 0;
+  ctx.fillText("bloques", g.L-6, yb + h/2); ctx.fillText("tramos", g.L-6, yt + h/2); if (ng) ctx.fillText("grupos", g.L-6, yg + h/2);
+  ctx.beginPath(); ctx.rect(g.L, yb-1, g.pw, (ng ? 3 : 2)*h + (ng ? 12 : 6)); ctx.clip();
+  D.grupos.forEach((gr, k) => {
+    if (gr.fin < P.view.v0 || gr.ini > P.view.v1) return;
+    const xa = xOf(P, g, gr.ini), xb = xOf(P, g, gr.fin), w = Math.max(1.5, xb - xa);
+    ctx.fillStyle = tipoCol(gr.tipo); ctx.globalAlpha = .9; ctx.fillRect(xa, yg, w, h);
+    if (k === S.selG){ ctx.globalAlpha = 1; ctx.strokeStyle = C.sel; ctx.lineWidth = 2; ctx.strokeRect(xa, yg, Math.max(w,2), h); }
+  });
+  D.bloques.forEach((bl, k) => {
+    if (bl.fin < P.view.v0 || bl.ini > P.view.v1) return;
+    const xa = xOf(P, g, bl.ini), xb = xOf(P, g, bl.fin), w = Math.max(1.5, xb - xa);
+    ctx.fillStyle = BCOL(k); ctx.globalAlpha = k === S.selB ? 1 : .8; ctx.fillRect(xa, yb, w, h);
+    if (k === S.selB){ ctx.globalAlpha = 1; ctx.strokeStyle = C.sel; ctx.lineWidth = 2; ctx.strokeRect(xa, yb, w, h); }
+    if (w > 60){ ctx.globalAlpha = 1; ctx.fillStyle = "#fff"; ctx.textAlign = "left"; ctx.fillText("B"+bl.id+" · "+bl.len+" saltos", Math.max(xa, g.L) + 4, yb + h/2); }
+  });
+  D.tramos.forEach((tr, k) => {
+    if (tr.fin < P.view.v0 || tr.ini > P.view.v1) return;
+    const xa = xOf(P, g, tr.ini), xb = xOf(P, g, tr.fin), w = Math.max(1, xb - xa);
+    ctx.fillStyle = clsColor(tr); ctx.globalAlpha = tr.sost ? .9 : .6; ctx.fillRect(xa, yt, w, h);
+    if (k === S.selT){ ctx.globalAlpha = 1; ctx.strokeStyle = C.sel; ctx.lineWidth = 2; ctx.strokeRect(xa, yt, Math.max(w,2), h); }
+  });
+  ctx.restore();
+}
+
+/* ---------------- interacción en los gráficos ---------------- */
+function bindMouse(P){
+  const cv = P.cv, wrap = cv.parentElement, tip = $("tip");
+  let drag = null;
+  const pos = e => { const r = cv.getBoundingClientRect(); return {x:e.clientX - r.left, y:e.clientY - r.top}; };
+  function nearest(t){
+    const D = S.D, k = lowerBound(D.PT, t); let best = -1, bd = Infinity;
+    for (const j of [k-1, k]) if (j >= 0 && j < D.np){ const d = Math.abs(D.PT[j] - t); if (d < bd){ bd = d; best = j; } }
+    return best;
+  }
+  function laneAt(y, g){
+    if (!g.lanes) return null;
+    const yb = g.T + g.ph + 20, yt = yb + 15, yg = yt + 15;
+    if (y >= yb && y <= yb+11) return "b"; if (y >= yt && y <= yt+11) return "t";
+    if (S.D && S.D.grupos.length && y >= yg && y <= yg+11) return "g"; return null;
+  }
+  function itemAt(list, t){
+    let lo = 0, hi = list.length-1, r = -1;
+    while (lo <= hi){ const m = (lo+hi)>>1; if (list[m].ini <= t){ r = m; lo = m+1; } else hi = m-1; }
+    return r >= 0 && t <= list[r].fin + S.D.cad ? r : -1;
+  }
+  cv.addEventListener("mousemove", e => {
+    const D = S.D; if (!D || !P.geo) return;
+    const {x, y} = pos(e), g = P.geo;
+    if (drag){
+      drag.x1 = Math.max(g.L, Math.min(g.L+g.pw, x));
+      const xa = Math.min(drag.x0, drag.x1), xb = Math.max(drag.x0, drag.x1);
+      P.box.style.display = "block"; P.box.style.left = (8 + xa) + "px"; P.box.style.width = (xb - xa) + "px"; P.box.style.height = g.ph + "px";
+      return;
+    }
+    if (x < g.L || x > g.L+g.pw){ tip.style.display = "none"; P.cur.style.display = "none"; return; }
+    const t = tOf(P, g, x);
+    P.cur.style.display = "block"; P.cur.style.left = (8 + x) + "px"; P.cur.style.height = g.ph + "px";
+    let txt = "";
+    const lane = laneAt(y, g);
+    if (lane === "b"){ const k = itemAt(D.bloques, t); if (k >= 0){ const bl = D.bloques[k]; txt = "Bloque B"+bl.id+" · "+bl.len+" saltos"+(bl.modal?" (modal)":"")+"\n"+fmtT(bl.ini)+" → "+fmtT(bl.fin)+"\n"+bl.n+" ciclos · "+fmtDur(bl.fin-bl.ini+D.cad)+(bl.st?"\nmediana "+f2(bl.st.med)+" ms":"")+"\nfuera: "+bl.fuera; } }
+    else if (lane === "g"){ const k = itemAt(D.grupos, t); if (k >= 0){ const gr = D.grupos[k]; txt = "Grupo "+gr.id+" · "+gr.tipo+"\n"+gr.startTs+" → "+gr.endTs+"\n"+gr.n+" ciclos · "+gr.dur+" min"; } }
+    else if (lane === "t"){ const k = itemAt(D.tramos, t); if (k >= 0){ const tr = D.tramos[k]; txt = "Tramo T"+tr.id+" · "+tr.len+" saltos\n"+(tr.sost?"sostenido":"no sostenido")+(tr.modal?" · modal":"")+"\n"+fmtT(tr.ini)+" → "+fmtT(tr.fin)+"\n"+tr.n+" ciclos"+(tr.st?" · mediana "+f2(tr.st.med)+" ms":""); } }
+    else {
+      const j = nearest(t);
+      if (j >= 0){
+        const px = xOf(P, g, D.PT[j]);
+        if (Math.abs(px - x) < 14){
+          const i = D.PI[j], tr = D.trOf[i] >= 0 ? D.tramos[D.trOf[i]] : null, bl = D.blOf[i] >= 0 ? D.bloques[D.blOf[i]] : null;
+          txt = fmtTs(D.PT[j])+"\nRTT "+f2(D.PV[j])+" ms · "+D.tL[i]+" saltos"+(tr?"\nTramo T"+tr.id+(tr.sost?" (sostenido)":" (no sostenido)"):"")+(bl?"\nBloque B"+bl.id:"")+(D.grOf[i] >= 0 ? "\nGrupo "+D.grupos[D.grOf[i]].id+" · "+tipoLargo(D.grupos[D.grOf[i]].tipo) : "");
+        }
+      }
+    }
+    if (txt){ tip.textContent = txt; tip.style.display = "block"; tip.style.left = Math.min(window.innerWidth - 350, e.clientX + 14) + "px"; tip.style.top = (e.clientY + 14) + "px"; }
+    else tip.style.display = "none";
+  });
+  cv.addEventListener("mouseleave", () => { tip.style.display = "none"; P.cur.style.display = "none"; });
+  cv.addEventListener("mousedown", e => {
+    if (!S.D || !P.geo) return; const {x, y} = pos(e), g = P.geo;
+    if (x < g.L || x > g.L+g.pw || laneAt(y, g)) return;
+    drag = {x0:x, x1:x, y};
+  });
+  window.addEventListener("mouseup", e => {
+    if (!drag) return; const d = drag; drag = null; P.box.style.display = "none";
+    const g = P.geo, D = S.D; if (!g || !D) return;
+    if (Math.abs(d.x1 - d.x0) > 6){
+      const ta = tOf(P, g, Math.min(d.x0, d.x1)), tb = tOf(P, g, Math.max(d.x0, d.x1));
+      setView(P, ta, tb);
+    } else if (P.kind !== "main"){
+      const j = nearest(tOf(P, g, d.x0));
+      if (j >= 0 && Math.abs(xOf(P, g, D.PT[j]) - d.x0) < 14){
+        const i = D.PI[j];
+        if (P.kind === "tr" && D.trOf[i] >= 0) selTramo(D.trOf[i], false);
+        if (P.kind === "bl" && D.blOf[i] >= 0) selBloque(D.blOf[i], false);
+        if (P.kind === "gr" && D.grOf[i] >= 0) selGrupo(D.grOf[i], false);
+      }
+    }
+  });
+  cv.addEventListener("click", e => {
+    const D = S.D; if (!D || P.kind !== "main" || !P.geo) return;
+    const {x, y} = pos(e), g = P.geo, lane = laneAt(y, g); if (!lane || x < g.L || x > g.L+g.pw) return;
+    const t = tOf(P, g, x);
+    if (lane === "b"){ const k = itemAt(D.bloques, t); if (k >= 0) selBloque(k, false); }
+    else if (lane === "g"){ const k = itemAt(D.grupos, t); if (k >= 0) selGrupo(k, false); }
+    else { const k = itemAt(D.tramos, t); if (k >= 0) selTramo(k, false); }
+  });
+  cv.addEventListener("dblclick", () => resetView(P));
+}
+
+/* ---------------- selección ---------------- */
+function selTramo(k, scroll){
+  S.selT = k; resetView(PANELS.p2, true); renderTodo(); marcarFila("lT", k, true);
+}
+function selGrupo(k, scroll){
+  S.selG = k; resetView(PANELS.p4, true); renderTodo(); marcarFila("lG", k, true);
+}
+function selBloque(k, scroll){
+  S.selB = k; resetView(PANELS.p3, true); renderTodo(); marcarFila("lB", k, true);
+}
+function marcarFila(id, k, scroll){
+  const pane = $(id);
+  pane.querySelectorAll("tr.sel").forEach(r => r.classList.remove("sel"));
+  const tr = pane.querySelector('tr[data-k="'+k+'"]');
+  if (tr){ tr.classList.add("sel"); if (scroll) tr.scrollIntoView({block:"nearest"}); }
+}
+$("zT").addEventListener("click", () => { const D = S.D; if (D && S.selT >= 0){ const t = D.tramos[S.selT], pad = Math.max((t.fin-t.ini)*.05, D.cad*2); setView(PANELS.p1, t.ini-pad, t.fin+pad); } });
+$("zB").addEventListener("click", () => { const D = S.D; if (D && S.selB >= 0){ const t = D.bloques[S.selB], pad = Math.max((t.fin-t.ini)*.05, D.cad*2); setView(PANELS.p1, t.ini-pad, t.fin+pad); } });
+
+/* ---------------- tarjetas de estadísticos ---------------- */
+function card(k, v, wide){ return '<div class="k"'+(wide ? ' style="grid-column:span 2"' : '')+'><small>'+k+'</small><b>'+v+'</b></div>'; }
+function statsHTML(it, tipo){
+  const D = S.D, st = it.st, ms = it.fin - it.ini + D.cad;
+  let h = '<div class="hd">'+tipo+' · '+fmtT(it.ini)+' → '+fmtT(it.fin)+'</div>';
+  h += card("Longitud", it.len+" saltos") + card("Ciclos", it.n) + card("Duración", fmtDur(ms));
+  if (tipo[0] === "B") h += card("Fuera", it.fuera+" ("+(100*it.fuera/it.n).toFixed(1)+" %)") + card("Tramos sostenidos", it.ntr || "–");
+  else { const bi = D.blOf[it.i0]; h += card("Tipo", it.sost ? (it.modal ? "sostenido · modal" : "sostenido · otra long.") : "no sostenido") + card("Bloque", bi >= 0 ? "B"+D.bloques[bi].id : "–"); }
+  if (st) h += card("Mediana", f2(st.med)+" ms") + card("Media", f2(st.mean)+" ms") + card("σ robusta", f2(st.sig)+" ms") + card("p5", f2(st.p5)+" ms") + card("p95", f2(st.p95)+" ms") + card("Mín", f2(st.min)+" ms") + card("Máx", f2(st.max)+" ms") + card("Con RTT", st.n+" / "+it.n);
+  else h += card("Con RTT", "0 / "+it.n);
+  return h;
+}
+function statsGrupo(gr){
+  const st = gr.st;
+  let h = '<div class="hd">Grupo '+gr.id+' · <span class="sw" style="background:'+tipoCol(gr.tipo)+'"></span>'+esc(gr.tipo)+'</div>';
+  h += card("start_ts", esc(gr.startTs), 1) + card("end_ts", esc(gr.endTs), 1) + card("n_ciclos", gr.n) + card("duracion_minutos", gr.dur+" min");
+  h += card("Ciclos del historial en el rango", gr.nh);
+  if (S.raw.x) h += card("Excluidos (CSV) en el rango", gr.ne);
+  if (st) h += card("Mediana RTT (historial)", f2(st.med)+" ms") + card("p5", f2(st.p5)+" ms") + card("p95", f2(st.p95)+" ms") + card("Máx", f2(st.max)+" ms");
+  return h;
+}
+function renderStats(){
+  const D = S.D;
+  $("st2").innerHTML = D.tramos.length && S.selT >= 0 ? statsHTML(D.tramos[S.selT], "Tramo T"+D.tramos[S.selT].id) : "";
+  $("st3").innerHTML = D.bloques.length && S.selB >= 0 ? statsHTML(D.bloques[S.selB], "Bloque B"+D.bloques[S.selB].id) : "";
+  $("st4").innerHTML = D.grupos.length && S.selG >= 0 ? statsGrupo(D.grupos[S.selG]) : "";
+  const gsel = S.selG >= 0 ? D.grupos[S.selG] : null;
+  $("t4").textContent = !D.grupos.length ? "carga segmentos_caracterizados_agrupados_…csv" : gsel ? "Grupo "+gsel.id+" · "+tipoLargo(gsel.tipo)+" · "+gsel.n+" ciclos" : "sin selección: todos los grupos";
+  const cuenta = {}; D.grupos.forEach(g => cuenta[g.tipo] = (cuenta[g.tipo]||0) + 1);
+  $("lg4").innerHTML = Object.keys(cuenta).sort((a,b) => (TIPO_IDX[a] ?? 9) - (TIPO_IDX[b] ?? 9)).map(t => '<span><i style="background:'+tipoCol(t)+'"></i>'+esc(tipoLargo(t))+' ('+cuenta[t]+')</span>').join("") +
+    (D.grupos.length ? '<span><s></s>mediana del grupo (historial)</span><span class="mut">Clic en un punto o en el carril «grupos» = elegir grupo</span>' : "");
+  const tr = S.selT >= 0 ? D.tramos[S.selT] : null, bl = S.selB >= 0 ? D.bloques[S.selB] : null;
+  $("t2").textContent = !D.tramos.length ? "carga tramos_longitud_…csv" : tr ? "Tramo T"+tr.id+" · "+tr.len+" saltos · "+tr.n+" ciclos" : "sin selección: todos los tramos";
+  $("t3").textContent = !D.bloques.length ? "carga bloques_longitud_…csv" : bl ? "Bloque B"+bl.id+" · "+bl.len+" saltos · "+bl.n+" ciclos" : "sin selección: todos los bloques";
+  $("zT").disabled = !tr; $("zB").disabled = !bl;
+}
+function renderTodo(){
+  if (!S.D) return;
+  renderStats();
+  for (const k of ["p1","p2","p3","p4"]) draw(PANELS[k]);
+  if (S.selT >= 0) marcarFila("lT", S.selT, false);
+  if (S.selB >= 0) marcarFila("lB", S.selB, false);
+  if (S.selG >= 0) marcarFila("lG", S.selG, false);
+}
+
+/* ---------------- listas auxiliares ---------------- */
+function renderListas(){
+  const D = S.D;
+  if (!D){ return; }
+  // tramos
+  const ft = $("fT2").value;
+  let ids = D.tramos.map((t,k) => k).filter(k => { const t = D.tramos[k];
+    return ft === "all" || (ft === "sost" && t.sost) || (ft === "mod" && t.sost && t.modal) || (ft === "nomod" && t.sost && !t.modal) || (ft === "nosost" && !t.sost); });
+  const keyT = {id:t=>t.id, ini:t=>t.ini, len:t=>t.len, n:t=>t.n, dur:t=>t.fin-t.ini, med:t=>t.st ? t.st.med : -1};
+  ids.sort((a,b) => (keyT[S.sortT.k](D.tramos[a]) - keyT[S.sortT.k](D.tramos[b]))*S.sortT.dir);
+  S.listT = ids;
+  $("aTn").textContent = D.tramos.length ? ids.length+" de "+D.tramos.length : "";
+  const LIM = 1500;
+  $("lT").innerHTML = !D.tramos.length ? '<div class="empty">Carga <b>tramos_longitud_…csv</b>.</div>' :
+    '<table><thead><tr>'+thH("T","id","#")+thH("T","ini","inicio")+thH("T","len","saltos",1)+thH("T","n","ciclos",1)+thH("T","dur","duración",1)+thH("T","med","mediana",1)+'</tr></thead><tbody>'+
+    ids.slice(0, LIM).map(k => { const t = D.tramos[k];
+      return '<tr class="click" data-k="'+k+'"><td><span class="sw" style="background:'+clsColor(t)+'"></span>T'+t.id+'</td><td>'+fmtShort(t.ini)+'</td><td class="n">'+t.len+'</td><td class="n">'+t.n+'</td><td class="n">'+fmtDur(t.fin-t.ini+D.cad)+'</td><td class="n">'+(t.st ? f2(t.st.med) : "–")+'</td></tr>'; }).join("")+
+    '</tbody></table>'+(ids.length > LIM ? '<div class="empty">Se muestran los primeros '+LIM+' tramos; filtra u ordena para ver el resto.</div>' : "");
+  // bloques
+  const fb = $("fB2").value;
+  let idb = D.bloques.map((b,k) => k).filter(k => { const b = D.bloques[k]; return fb === "all" || (fb === "mod" && b.modal) || (fb === "nomod" && !b.modal); });
+  const keyB = {id:b=>b.id, ini:b=>b.ini, len:b=>b.len, n:b=>b.n, dur:b=>b.fin-b.ini, fuera:b=>b.fuera, med:b=>b.st ? b.st.med : -1};
+  idb.sort((a,b) => (keyB[S.sortB.k](D.bloques[a]) - keyB[S.sortB.k](D.bloques[b]))*S.sortB.dir);
+  S.listB = idb;
+  $("aBn").textContent = D.bloques.length ? idb.length+" de "+D.bloques.length : "";
+  $("lB").innerHTML = !D.bloques.length ? '<div class="empty">Carga <b>bloques_longitud_…csv</b>.</div>' :
+    '<table><thead><tr>'+thH("B","id","#")+thH("B","ini","inicio")+thH("B","len","saltos",1)+thH("B","n","ciclos",1)+thH("B","dur","duración",1)+thH("B","fuera","fuera",1)+thH("B","med","mediana",1)+'</tr></thead><tbody>'+
+    idb.map(k => { const b = D.bloques[k];
+      return '<tr class="click" data-k="'+k+'"><td><span class="sw" style="background:'+BCOL(k)+'"></span>B'+b.id+'</td><td>'+fmtShort(b.ini)+'</td><td class="n">'+b.len+'</td><td class="n">'+b.n+'</td><td class="n">'+fmtDur(b.fin-b.ini+D.cad)+'</td><td class="n">'+b.fuera+'</td><td class="n">'+(b.st ? f2(b.st.med) : "–")+'</td></tr>'; }).join("")+'</tbody></table>';
+  $("lT").querySelectorAll("tr.click").forEach(r => r.addEventListener("click", () => selTramo(+r.dataset.k, true)));
+  $("lB").querySelectorAll("tr.click").forEach(r => r.addEventListener("click", () => selBloque(+r.dataset.k, true)));
+  $("lT").querySelectorAll("th").forEach(th => th.addEventListener("click", () => { const k = th.dataset.k; S.sortT = {k, dir:S.sortT.k === k ? -S.sortT.dir : 1}; renderListas(); }));
+  $("lB").querySelectorAll("th").forEach(th => th.addEventListener("click", () => { const k = th.dataset.k; S.sortB = {k, dir:S.sortB.k === k ? -S.sortB.dir : 1}; renderListas(); }));
+  // grupos
+  const sg = $("fG2"), tipos = Array.from(new Set(D.grupos.map(g => g.tipo))), prevT = sg.value;
+  sg.innerHTML = '<option value="all">Todos</option>' + tipos.map(t => '<option value="'+esc(t)+'">'+esc(tipoLargo(t))+'</option>').join("");
+  sg.value = tipos.indexOf(prevT) >= 0 ? prevT : "all";
+  let idg = D.grupos.map((g,k) => k).filter(k => sg.value === "all" || D.grupos[k].tipo === sg.value);
+  const keyG = {id:g=>g.id, ini:g=>g.ini, fin:g=>g.fin, n:g=>g.n, dur:g=>g.dur, tipo:g=>g.tipo};
+  idg.sort((a,b) => { const x = keyG[S.sortG.k](D.grupos[a]), y = keyG[S.sortG.k](D.grupos[b]); return (x < y ? -1 : x > y ? 1 : 0)*S.sortG.dir; });
+  S.listG = idg;
+  $("aGn").textContent = D.grupos.length ? idg.length+" de "+D.grupos.length : "";
+  $("lG").innerHTML = !D.grupos.length ? '<div class="empty">Carga <b>segmentos_caracterizados_agrupados_…csv</b>.</div>' :
+    '<table><thead><tr>'+thH("G","id","#")+thH("G","ini","start_ts")+thH("G","fin","end_ts")+thH("G","n","n_ciclos",1)+thH("G","dur","dur. (min)",1)+thH("G","tipo","tipo")+'</tr></thead><tbody>'+
+    idg.map(k => { const g = D.grupos[k];
+      return '<tr class="click" data-k="'+k+'"><td>G'+g.id+'</td><td>'+fmtShort(g.ini)+'</td><td>'+fmtShort(g.fin)+'</td><td class="n">'+g.n+'</td><td class="n">'+g.dur+'</td><td title="'+esc(g.tipo)+'"><span class="sw" style="background:'+tipoCol(g.tipo)+'"></span>'+esc(tipoCorto(g.tipo))+'</td></tr>'; }).join("")+'</tbody></table>';
+  $("lG").querySelectorAll("tr.click").forEach(r => r.addEventListener("click", () => selGrupo(+r.dataset.k, true)));
+  $("lG").querySelectorAll("th").forEach(th => th.addEventListener("click", () => { const k = th.dataset.k; S.sortG = {k, dir:S.sortG.k === k ? -S.sortG.dir : 1}; renderListas(); }));
+  if (S.selT >= 0) marcarFila("lT", S.selT, false);
+  if (S.selB >= 0) marcarFila("lB", S.selB, false);
+  if (S.selG >= 0) marcarFila("lG", S.selG, false);
+}
+function thH(w, k, txt, num){
+  const s = w === "T" ? S.sortT : w === "G" ? S.sortG : S.sortB, arrow = s.k === k ? (s.dir > 0 ? " ▲" : " ▼") : "";
+  return '<th data-k="'+k+'" class="'+(num?"n":"")+'">'+txt+arrow+'</th>';
+}
+["fT2","fB2","fG2"].forEach(id => $(id).addEventListener("change", renderListas));
+$("cTrIn").addEventListener("change", () => draw(PANELS.p3));
+$("cND").addEventListener("change", () => draw(PANELS.p1));
+$("cLane").addEventListener("change", () => { PANELS.p1.h = $("cLane").checked ? 330 : 300; draw(PANELS.p1); });
+
+/* ---------------- ayuda y arranque ---------------- */
+const help = $("help");
+const toggleHelp = f => help.classList.toggle("open", f);
+$("bHelp").addEventListener("click", () => toggleHelp(true));
+$("bHelpX").addEventListener("click", () => toggleHelp(false));
+help.addEventListener("click", e => { if (e.target === help) toggleHelp(false); });
+document.addEventListener("keydown", e => {
+  if (e.target && /INPUT|SELECT|TEXTAREA/.test(e.target.tagName)) return;
+  if (e.key === "Escape") toggleHelp(false);
+  if (e.key === "?") toggleHelp(true);
+});
+mkPanel("p1", "main", 330); mkPanel("p2", "tr", 300); mkPanel("p3", "bl", 300); mkPanel("p4", "gr", 300);
+let rz = null;
+window.addEventListener("resize", () => { clearTimeout(rz); rz = setTimeout(() => { if (S.D) for (const k of ["p1","p2","p3","p4"]) draw(PANELS[k]); }, 80); });
+matchMedia("(prefers-color-scheme:dark)").addEventListener("change", () => { if (S.D) renderTodo(); });
+for (const k of ["p1","p2","p3","p4"]){ const P = PANELS[k], g = geom(P); P.cv.style.height = P.h + "px"; }
+</script>
+</body>
+</html>
