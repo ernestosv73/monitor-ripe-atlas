@@ -27,6 +27,14 @@ Cambios respecto de v5:
      Esos eventos se basan en cambios de RTT entre ciclos consecutivos (light/medium/dark), mientras que este script
      busca puntos de cambio sostenidos dentro de cada bloque: no son comparables. El archivo de puntos de cambio pasa
      a llamarse change_points_*.csv (columnas: timestamp, estado_anterior, estado_nuevo).
+  6. La severidad ya no se mide contra un unico P25 global de toda la serie. Cada segmento se compara contra el
+     RTT de referencia de SU RUTA (P25 de los ciclos de todos los bloques con la misma longitud), y la clasificacion
+     tiene signo: una mediana por debajo de la referencia es 'mejora_*', no 'degradacion_*' (antes abs() las
+     mezclaba: un cambio de ruta que MEJORABA el RTT salia como degradacion severa). Ademas, el cambio de ruta entre
+     bloques consecutivos se clasifica como evento propio (mediana de los ultimos/primeros --ventana-borde ciclos de
+     cada bloque, con signo) y se exporta en cambios_de_ruta_*.csv. Los segmentos consecutivos del mismo tipo solo se
+     agrupan si son de la misma longitud. segmentos_caracterizados_*.csv agrega bloque_id, longitud, rtt_referencia,
+     desviacion_ms al final. 'Ruta' = longitud del bloque (verificar_caminos.py no entrega un identificador de ruta).
 Basado en: Mouchet et al., "Large-Scale Characterization and Segmentation of
            Internet Path Delays with Infinite HMMs" (arXiv:1910.12714)
 
@@ -61,6 +69,11 @@ MAPA_MACRO_ESTADOS_DEFAULT = {
     2: 2,                  # Macro 2: Congestión
     5: 3,                  # Macro 3: Outlier
 }
+
+
+# Umbrales de magnitud (ms) para severidad, tanto de segmentos como de cambios de ruta
+UMBRAL_SEVERA_MS = 5.0
+UMBRAL_MODERADA_MS = 2.0
 
 
 # ============================================================================
@@ -511,16 +524,59 @@ def calcular_calidad_segmentacion(serie_completa, segmentos):
         'n_segmentos': len(segmentos)
     }
 
-def clasificar_tipo_degradacion(segmento, rtt_normal):
-    # Cambio 4: se usa la MEDIANA del segmento (robusta a spikes) en lugar de la media
-    desviacion = segmento['mediana'] - rtt_normal
+def clasificar_tipo_degradacion(segmento, rtt_referencia):
+    """
+    Clasifica un segmento contra el RTT de referencia de su ruta (no contra un valor global).
+    Usa la MEDIANA del segmento (robusta a spikes) y conserva el SIGNO de la desviacion:
+    por encima de la referencia -> 'degradacion_*'; por debajo -> 'mejora_*'.
+    """
+    desviacion = segmento['mediana'] - rtt_referencia
+    magnitud = abs(desviacion)
     duracion = segmento['duracion_minutos']
+    prefijo = 'degradacion' if desviacion > 0 else 'mejora'
     
-    if duracion > 60 and abs(desviacion) > 5: return 'degradacion_severa_sostenida'
-    elif duracion > 30 and abs(desviacion) > 2: return 'degradacion_moderada_sostenida'
-    elif duracion < 10 and abs(desviacion) > 10: return 'pico_transitorio'
-    elif abs(desviacion) < 1: return 'regimen_base'
+    if duracion > 60 and magnitud > UMBRAL_SEVERA_MS: return prefijo + '_severa_sostenida'
+    elif duracion > 30 and magnitud > UMBRAL_MODERADA_MS: return prefijo + '_moderada_sostenida'
+    elif duracion < 10 and magnitud > 10: return 'pico_transitorio'
+    elif magnitud < 1: return 'regimen_base'
     else: return 'variacion_normal'
+
+
+def calcular_referencias_por_ruta(rtts_por_longitud):
+    """RTT de referencia (P25) de cada ruta, usando los ciclos de todos los bloques con esa longitud."""
+    return dict((lon, float(np.percentile(rtts, 25))) for lon, rtts in rtts_por_longitud.items() if rtts)
+
+
+def clasificar_cambio_rtt(delta):
+    """Clasifica con signo el salto de RTT entre dos bloques consecutivos."""
+    magnitud = abs(delta)
+    if magnitud > UMBRAL_SEVERA_MS: nivel = 'severa'
+    elif magnitud > UMBRAL_MODERADA_MS: nivel = 'moderada'
+    else: return 'sin_cambio_relevante'
+    return ('degradacion_' if delta > 0 else 'mejora_') + nivel
+
+
+def detectar_cambios_de_ruta(info_bloques, ventana):
+    """
+    Un cambio de ruta es la frontera entre dos bloques procesados y contiguos. Se mide el RTT justo antes y justo
+    despues: mediana de los ultimos / primeros 'ventana' ciclos de cada bloque (o menos, si un bloque es mas corto).
+    Se usan los bordes y no la mediana de todo el bloque, porque un bloque largo puede haber cambiado de regimen
+    antes de terminar (p. ej. B1 terminaba en ~34 ms aunque su mediana global sea ~29 ms).
+    """
+    cambios = []
+    for ant, sig in zip(info_bloques[:-1], info_bloques[1:]):
+        if sig['idx'] != ant['idx'] + 1:
+            continue  # hay un bloque omitido entre ambos: no son contiguos
+        w = min(ventana, ant['n'], sig['n'])
+        antes = float(np.median(ant['rtts_fin'][-w:]))
+        despues = float(np.median(sig['rtts_ini'][:w]))
+        delta = despues - antes
+        cambios.append({
+            'timestamp': sig['start_ts'], 'bloque_anterior': ant['bloque_id'], 'bloque_siguiente': sig['bloque_id'],
+            'longitud_anterior': ant['longitud'], 'longitud_siguiente': sig['longitud'],
+            'rtt_antes': antes, 'rtt_despues': despues, 'delta_rtt': delta,
+            'tipo_cambio': clasificar_cambio_rtt(delta), 'ventana': w})
+    return cambios
 
 
 # ============================================================================
@@ -545,7 +601,9 @@ def agrupar_segmentos_consecutivos(segmentos):
     current_group = []
     
     for seg in segmentos:
-        if not current_group or current_group[-1]['tipo_degradacion'] == seg['tipo_degradacion']:
+        # Solo se agrupan segmentos del mismo tipo Y de la misma ruta (longitud): la referencia es por ruta
+        if (not current_group or (current_group[-1]['tipo_degradacion'] == seg['tipo_degradacion']
+                                  and current_group[-1].get('longitud') == seg.get('longitud'))):
             current_group.append(seg)
         else:
             grupos_raw.append(current_group)
@@ -597,7 +655,8 @@ def agrupar_segmentos_consecutivos(segmentos):
 # ============================================================================
 def exportar_resultados(serie_completa, secuencias, estados_por_secuencia, estados_suaves_por_secuencia,
                         change_points, segmentos, metricas_calidad, output_dir, measurement_id, probe_id,
-                        longitudes=None, cambios_longitud=None, tipo_fusion=None, mapa_fusion=None):
+                        longitudes=None, cambios_longitud=None, tipo_fusion=None, mapa_fusion=None,
+                        cambios_ruta=None, referencias=None):
     print("[FASE 6] Exportando resultados a: {}".format(output_dir))
     if not os.path.exists(output_dir): os.makedirs(output_dir)
     
@@ -617,12 +676,15 @@ def exportar_resultados(serie_completa, secuencias, estados_por_secuencia, estad
     with open(path_segmentos, 'w') as f:
         writer = csv.writer(f)
         writer.writerow(['seq_id', 'estado', 'start_ts', 'end_ts', 'n_ciclos', 'duracion_minutos',
-                        'media', 'mediana', 'std', 'min', 'max', 'tipo_degradacion'])
+                        'media', 'mediana', 'std', 'min', 'max', 'tipo_degradacion',
+                        'bloque_id', 'longitud', 'rtt_referencia', 'desviacion_ms'])
         for seg in segmentos:
             writer.writerow([seg['seq_id'], seg['estado'], seg['start_ts'], seg['end_ts'],
                            seg['n_ciclos'], fmt_min(seg['duracion_minutos']), "{:.3f}".format(seg['media']),
                            "{:.3f}".format(seg['mediana']), "{:.3f}".format(seg['std']),
-                           "{:.3f}".format(seg['min']), "{:.3f}".format(seg['max']), seg['tipo_degradacion']])
+                           "{:.3f}".format(seg['min']), "{:.3f}".format(seg['max']), seg['tipo_degradacion'],
+                           seg.get('bloque_id', ''), seg.get('longitud', ''),
+                           "{:.3f}".format(seg['rtt_referencia']), "{:.3f}".format(seg['desviacion_ms'])])
     print("  - Segmentos caracterizados: {}".format(path_segmentos))
     
     # 2b. Segmentos caracterizados AGRUPADOS
@@ -640,6 +702,20 @@ def exportar_resultados(serie_completa, secuencias, estados_por_secuencia, estad
                            "{:.3f}".format(grp['max']), grp['tipo_degradacion'], 
                            grp['n_segmentos_originales']])
     print("  - Segmentos agrupados: {} ({} grupos)".format(path_agrupados, len(segmentos_agrupados)))
+    
+    # 2c. Cambios de ruta (frontera entre bloques contiguos, con signo)
+    cambios_ruta = cambios_ruta or []
+    path_cr = os.path.join(output_dir, 'cambios_de_ruta{}{}.csv'.format(ids_suffix, fusion_suffix))
+    with open(path_cr, 'w') as f:
+        writer = csv.writer(f)
+        writer.writerow(['timestamp', 'bloque_anterior', 'bloque_siguiente', 'longitud_anterior', 'longitud_siguiente',
+                        'delta_saltos', 'rtt_antes_ms', 'rtt_despues_ms', 'delta_rtt_ms', 'tipo_cambio', 'ciclos_ventana'])
+        for c in cambios_ruta:
+            writer.writerow([c['timestamp'], c['bloque_anterior'], c['bloque_siguiente'], c['longitud_anterior'],
+                           c['longitud_siguiente'], c['longitud_siguiente'] - c['longitud_anterior'],
+                           "{:.3f}".format(c['rtt_antes']), "{:.3f}".format(c['rtt_despues']),
+                           "{:.3f}".format(c['delta_rtt']), c['tipo_cambio'], c['ventana']])
+    print("  - Cambios de ruta: {} ({} cambios)".format(path_cr, len(cambios_ruta)))
     
     # 3. Puntos de cambio
     with open(os.path.join(output_dir, 'change_points{}{}.csv'.format(ids_suffix, fusion_suffix)), 'w') as f:
@@ -685,7 +761,15 @@ def exportar_resultados(serie_completa, secuencias, estados_por_secuencia, estad
         f.write("Ratio de calidad: {:.4f}\nDuración media de segmentos: {:.2f} minutos\n\n".format(
             metricas_calidad['ratio_calidad'], metricas_calidad['duracion_media_segmentos']))
         
-        f.write("--- PUNTOS DE CAMBIO ---\nPuntos de cambio detectados: {}\n".format(len(change_points)))
+        f.write("--- RTT DE REFERENCIA POR RUTA (P25 de los bloques con la misma longitud) ---\n")
+        for lon in sorted((referencias or {}).keys()):
+            f.write("  {} saltos: {:.2f} ms\n".format(lon, referencias[lon]))
+        f.write("\n--- CAMBIOS DE RUTA ---\nCambios de ruta clasificados: {}\n".format(len(cambios_ruta)))
+        for c in cambios_ruta:
+            f.write("  B{}->B{} ({}->{} saltos): {:.2f} -> {:.2f} ms (delta {:+.2f}) {}\n".format(
+                c['bloque_anterior'], c['bloque_siguiente'], c['longitud_anterior'], c['longitud_siguiente'],
+                c['rtt_antes'], c['rtt_despues'], c['delta_rtt'], c['tipo_cambio']))
+        f.write("\n--- PUNTOS DE CAMBIO ---\nPuntos de cambio detectados: {}\n".format(len(change_points)))
         f.write("\n" + "=" * 70 + "\n")
 
 
@@ -721,11 +805,16 @@ def main():
     parser.add_argument('--percentil-outliers', type=float, default=0.0,
                         help='Descarta por bloque los ciclos con RTT por encima de este percentil (p. ej. 99). '
                              'Default 0 = sin filtro (el filtro borra ciclos del propio evento degradado)')
+    parser.add_argument('--ventana-borde', type=int, default=10,
+                        help='Ciclos a cada lado de la frontera entre bloques para medir el cambio de RTT de un '
+                             'cambio de ruta (mediana de los ultimos/primeros N ciclos; default 10)')
     parser.add_argument('--umbral-db', type=float, default=0.5, help='Distancia de Bhattacharyya máxima (default: 0.5)')
     
     args = parser.parse_args()
     if args.interval <= 0:
         parser.error("--interval debe ser mayor que 0 (segundos entre ciclos)")
+    if args.ventana_borde < 1:
+        parser.error("--ventana-borde debe ser al menos 1")
     intervalo_min = args.interval / 60.0
     
     print("=" * 70)
@@ -756,6 +845,8 @@ def main():
     estados_por_secuencia_global = []
     estados_suaves_por_secuencia_global = []
     secuencias_global = []
+    rtts_por_longitud = defaultdict(list)   # RTT de todos los bloques de cada ruta (longitud), para la referencia
+    info_bloques = []                        # bordes de cada bloque procesado, para clasificar cambios de ruta
     
     for idx, bloque in enumerate(bloques):
         print("\n  [BLOQUE {}/{}] ID: {}, Longitud: {} hops, Ciclos totales: {}".format(
@@ -787,6 +878,12 @@ def main():
                 max(rtt for _, rtt in sub_serie)))
 
         print("    → Ciclos extraídos para análisis: {}".format(len(sub_serie)))
+        
+        rtts_sub = [rtt for _, rtt in sub_serie]
+        rtts_por_longitud[bloque['longitud']].extend(rtts_sub)
+        info_bloques.append({'idx': idx, 'bloque_id': bloque['bloque_id'], 'longitud': bloque['longitud'],
+                             'start_ts': sub_serie[0][0], 'n': len(rtts_sub),
+                             'rtts_ini': rtts_sub[:args.ventana_borde], 'rtts_fin': rtts_sub[-args.ventana_borde:]})
         
         # Cortar en secuencias por huecos temporales dentro del bloque
         secuencias = cortar_en_secuencias(sub_serie, args.gap_minutes)
@@ -824,6 +921,9 @@ def main():
         
         # Caracterización
         segmentos = caracterizar_segmentos(sub_serie, secuencias, estados_trabajo, estados_suaves, intervalo_min)
+        for seg in segmentos:
+            seg['bloque_id'] = bloque['bloque_id']
+            seg['longitud'] = bloque['longitud']
         todos_segmentos.extend(segmentos)
         
         # Change-points
@@ -835,13 +935,27 @@ def main():
         estados_suaves_por_secuencia_global.extend(estados_suaves)
         secuencias_global.extend(secuencias)
     
-    # Calcular RTT normal y clasificar segmentos
+    # RTT de referencia POR RUTA y clasificacion con signo
     rtts = [rtt for _, rtt, _ in serie_completa]
-    rtt_normal = np.percentile(rtts, 25)
-    print("\n  - RTT Normal (P25 global): {:.2f}ms".format(rtt_normal))
+    referencias = calcular_referencias_por_ruta(rtts_por_longitud)
+    print("\n  - RTT de referencia por ruta (P25 de los ciclos de los bloques con la misma longitud):")
+    for lon in sorted(referencias):
+        print("      {} saltos: {:.2f} ms ({} ciclos)".format(lon, referencias[lon], len(rtts_por_longitud[lon])))
+    print("  - (Informativo) P25 global de la serie, que ya no se usa para clasificar: {:.2f}ms".format(
+        np.percentile(rtts, 25)))
     
     for seg in todos_segmentos:
-        seg['tipo_degradacion'] = clasificar_tipo_degradacion(seg, rtt_normal)
+        ref = referencias[seg['longitud']]
+        seg['rtt_referencia'] = ref
+        seg['desviacion_ms'] = seg['mediana'] - ref
+        seg['tipo_degradacion'] = clasificar_tipo_degradacion(seg, ref)
+    
+    cambios_ruta = detectar_cambios_de_ruta(info_bloques, args.ventana_borde)
+    print("  - Cambios de ruta clasificados: {}".format(len(cambios_ruta)))
+    for c in cambios_ruta:
+        print("      B{}->B{} ({}->{} saltos): {:.2f} -> {:.2f} ms (delta {:+.2f}) {}".format(
+            c['bloque_anterior'], c['bloque_siguiente'], c['longitud_anterior'], c['longitud_siguiente'],
+            c['rtt_antes'], c['rtt_despues'], c['delta_rtt'], c['tipo_cambio']))
         
     metricas_calidad = calcular_calidad_segmentacion(serie_completa, todos_segmentos)
     print("  - Ratio de calidad global: {:.2f}".format(metricas_calidad['ratio_calidad']))
@@ -853,7 +967,7 @@ def main():
         serie_completa, secuencias_global, estados_por_secuencia_global, estados_suaves_por_secuencia_global,
         todos_change_points, todos_segmentos, metricas_calidad, args.output_dir,
         measurement_id, probe_id, longitudes=longitudes, cambios_longitud=cambios_longitud,
-        tipo_fusion=tipo_fusion, mapa_fusion=mapa_fusion)
+        tipo_fusion=tipo_fusion, mapa_fusion=mapa_fusion, cambios_ruta=cambios_ruta, referencias=referencias)
     
     print("\n" + "=" * 70)
     print("EJECUCIÓN COMPLETADA EXITOSAMENTE")
