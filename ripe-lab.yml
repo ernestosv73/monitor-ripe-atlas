@@ -21,6 +21,7 @@ topology:
       kind: linux
       image: docker.io/esanchezv/bnpy:latest  
       binds:
+       - configs/librerias.sh:/root/scripts/librerias.sh
        - scripts:/root/scripts
       exec:
        
