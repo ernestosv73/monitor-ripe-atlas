@@ -27,6 +27,9 @@ Cambios respecto de v5:
      Esos eventos se basan en cambios de RTT entre ciclos consecutivos (light/medium/dark), mientras que este script
      busca puntos de cambio sostenidos dentro de cada bloque: no son comparables. El archivo de puntos de cambio pasa
      a llamarse change_points_*.csv (columnas: timestamp, estado_anterior, estado_nuevo).
+  7. Correccion de _procesar_segmento: las estadisticas (media, mediana, std, min, max) de un segmento se calculan con
+     los RTT de su propia secuencia. Antes, en las secuencias posteriores a un hueco (seq_id >= 1) salian de los
+     primeros ciclos del bloque, y un segmento con RTT alto podia quedar como regimen_base.
   6. La severidad ya no se mide contra un unico P25 global de toda la serie. Cada segmento se compara contra el
      RTT de referencia de SU RUTA (P25 de los ciclos de todos los bloques con la misma longitud), y la clasificacion
      tiene signo: una mediana por debajo de la referencia es 'mejora_*', no 'degradacion_*' (antes abs() las
@@ -499,7 +502,10 @@ def caracterizar_segmentos(serie_completa, secuencias, estados_por_secuencia, es
     return segmentos
 
 def _procesar_segmento(serie_completa, seq, start_idx, end_idx, seq_id, estado, intervalo_min):
-    rtts_seg = [serie_completa[idx][1] for idx in range(start_idx, end_idx + 1)]
+    # Cambio 7: start_idx / end_idx son indices LOCALES de la secuencia 'seq', no de la serie del bloque. Antes se
+    # indexaba serie_completa con ellos, lo que solo era correcto en la secuencia 0: en las secuencias posteriores
+    # (despues de un hueco > --gap-minutes) las estadisticas salian de los primeros ciclos del bloque.
+    rtts_seg = [rtt for _, rtt in seq[start_idx:end_idx + 1]]
     return {
         'seq_id': seq_id, 'estado': estado,
         'start_ts': seq[start_idx][0], 'end_ts': seq[end_idx][0],
