@@ -15,6 +15,17 @@ Integra las 3 comprobaciones y las cruza en una sola salida:
     Se informa el tramo y el bloque de cada ciclo; los parpadeos/transitorios dentro de un bloque son los de la
     columna 'fuera' de bloques_longitud_*.csv.
   + Cruce 1 x 2: cuantos eventos del extractor corresponden a un cambio de camino real.
+  + DESTINO - IP FINAL Y RTT: cuando el ultimo salto usa mas de una IP (nombre de dominio con varias IP, DNS rotativo,
+    anycast), compara el RTT entre ellas (mediana/cuartiles, prueba de Kolmogorov-Smirnov y diferencia de medianas),
+    mide si alternan al azar o por rachas, y dice si son equivalentes (un solo target) o distintas (la serie mezcla
+    dos targets). Se exporta en destinos_ip_final_measurement<M>_probe<P>.csv. Los BLOQUES siguen armandose solo por
+    longitud: este informe NO separa la serie, solo avisa cuando haria falta.
+  + DIAGNOSTICO POR LONGITUD: compara el RTT del ultimo salto entre las longitudes de camino (mismos criterios KS +
+    diferencia de medianas) y dice si son equivalentes o distintas; exporta diagnostico_longitudes_measurement<M>_probe<P>.csv.
+    Por defecto NO cambia los bloques. Con --fusionar-longitudes-equivalentes los bloques se arman con la clase de
+    longitud (RTT equivalente y mismo AS-path modal). bloques_longitud_*.csv agrega 'ruta' (AS-path modal del bloque,
+    ASN unidos con '>') y 'longitudes' (longitudes presentes en el bloque, separadas por '|'); el HDP-HMM puede usar
+    cualquiera de las dos como clave de referencia (--clave-referencia).
   + LECTURA: conclusiones automaticas.
   Nota: los prefijos IPv6 de documentacion (2001:db8::/32, 3fff::/20) se tratan como IP publicas, para poder analizar
   historiales sinteticos; el resto de las IP privadas/reservadas siguen siendo "privadas" (red local de la sonda).
@@ -33,6 +44,7 @@ import csv
 import sys
 import argparse
 import ipaddress
+import math
 from collections import defaultdict, Counter
 
 ASN_VACIOS = ("", "unknown", "na", "none", "nan", "null")
@@ -144,6 +156,176 @@ def ids_de_archivo(p):
     return (m.group(1), m.group(2)) if m else (None, None)
 
 
+# ---- Comparacion del RTT entre las IP finales (destino con varias IP) ----
+DESTINO_P_KS = 0.01   # nivel de significancia de la prueba de Kolmogorov-Smirnov entre dos IP finales
+
+
+def cuantil(v, q):
+    """Cuantil con interpolacion lineal de una lista ordenada."""
+    n = len(v)
+    if n == 1:
+        return v[0]
+    pos = q * (n - 1)
+    i = int(pos)
+    f = pos - i
+    return v[i] if i + 1 >= n else v[i] * (1 - f) + v[i + 1] * f
+
+
+def ks_dos_muestras(a, b):
+    """Prueba de Kolmogorov-Smirnov de dos muestras (listas ordenadas). Devuelve (D, p asintotico)."""
+    na, nb = len(a), len(b)
+    i = j = 0
+    d = 0.0
+    while i < na and j < nb:
+        x = a[i] if a[i] <= b[j] else b[j]
+        while i < na and a[i] <= x:
+            i += 1
+        while j < nb and b[j] <= x:
+            j += 1
+        d = max(d, abs(i / float(na) - j / float(nb)))
+    ne = na * nb / float(na + nb)
+    lam = (math.sqrt(ne) + 0.12 + 0.11 / math.sqrt(ne)) * d
+    if lam < 1e-9:
+        return d, 1.0
+    p = 2.0 * sum((-1) ** (k - 1) * math.exp(-2.0 * k * k * lam * lam) for k in range(1, 101))
+    return d, min(1.0, max(0.0, p))
+
+
+def analizar_ips_finales(tss, ult, rtts, dif_ms, dif_rel, min_frac=0.02):
+    """Compara el RTT del ultimo salto entre las IP finales de los ciclos que llegaron al destino.
+
+    Dos IP se consideran DISTINTAS si el KS rechaza igualdad (p < DESTINO_P_KS) Y la diferencia de medianas es
+    relevante: >= max(dif_ms, dif_rel * la menor mediana). Con muestras grandes el KS detecta diferencias minusculas,
+    por eso se exige tambien la diferencia practica. Se comparan las IP con muestra suficiente
+    (>= max(10, min_frac * ciclos)) contra la mas frecuente."""
+    serie = []
+    for t in tss:
+        k, ip, asn = ult[t]
+        serie.append((t, ip, asn, rtts[t].get(k)))
+    n = len(serie)
+    cnt = Counter(x[1] for x in serie)
+    min_n = max(10, int(math.ceil(min_frac * n)))
+    principales = [ip for ip, c in cnt.most_common() if c >= min_n]
+    res = {"n": n, "filas": [], "otras": n - sum(cnt[ip] for ip in principales), "distintas": False,
+           "alt_obs": None, "alt_esp": None, "n_pares": 0, "racha": None, "comp": []}
+    datos = {}
+    for ip in principales:
+        v = sorted(x[3] for x in serie if x[1] == ip and x[3] is not None)
+        asns = Counter(x[2] for x in serie if x[1] == ip and asn_valido(x[2])).most_common(1)
+        fila = {"ip": ip, "asn": asns[0][0] if asns else "", "n": cnt[ip], "pct": 100.0 * cnt[ip] / n,
+                "n_rtt": len(v)}
+        if v:
+            fila.update(med=cuantil(v, 0.5), p25=cuantil(v, 0.25), p75=cuantil(v, 0.75), p95=cuantil(v, 0.95),
+                        mn=v[0], mx=v[-1])
+        datos[ip] = v
+        res["filas"].append(fila)
+    if len(principales) >= 2:
+        ips_ser = [x[1] for x in serie]
+        pares = list(zip(ips_ser[:-1], ips_ser[1:]))
+        res["n_pares"] = len(pares)
+        res["alt_obs"] = sum(1 for u, w in pares if u != w)
+        res["alt_esp"] = (1.0 - sum((c / float(n)) ** 2 for c in cnt.values())) * len(pares)
+        rachas, cur = [], 1
+        for u, w in pares:
+            if u == w:
+                cur += 1
+            else:
+                rachas.append(cur)
+                cur = 1
+        rachas.append(cur)
+        res["racha"] = sum(rachas) / float(len(rachas))
+        ref = principales[0]
+        for ip in principales[1:]:
+            a_, b_ = datos[ref], datos[ip]
+            if not a_ or not b_:
+                continue
+            d, p = ks_dos_muestras(a_, b_)
+            fa = res["filas"][0]
+            fb = [f for f in res["filas"] if f["ip"] == ip][0]
+            dif = fb["med"] - fa["med"]
+            umbral = max(dif_ms, dif_rel * min(fa["med"], fb["med"]))
+            distinta = (p < DESTINO_P_KS) and abs(dif) >= umbral
+            res["comp"].append(dict(ip=ip, ref=ref, D=d, p=p, dif=dif, umbral=umbral, distinta=distinta))
+            res["distintas"] = res["distintas"] or distinta
+    return res
+
+
+def analizar_longitudes(tss, firma, ult, rtts, dif_ms, dif_rel, min_frac=0.02):
+    """Compara el RTT del ultimo salto entre las LONGITUDES de camino observadas (ciclos que llegaron al destino).
+
+    Los bloques se arman por longitud, pero dos longitudes pueden ser el mismo camino con un salto de mas (RTT igual)
+    o caminos fisicos distintos dentro de los mismos AS (RTT distinto). Mismo criterio que analizar_ips_finales: dos
+    longitudes son DISTINTAS si el KS rechaza igualdad (p < DESTINO_P_KS) Y la diferencia de medianas es
+    >= max(dif_ms, dif_rel * la menor mediana). Para longitudes se usan --dif-long-ms (2 ms) y --dif-long-rel (0),
+    mas estrictos que los de las IP finales: el umbral relativo del 10% equivale a 3.3 ms con RTT de 33 ms, que deja
+    pasar como 'equivalentes' diferencias que el HDP-HMM ya trata como degradacion moderada (> 2 ms). Solo se comparan las longitudes con muestra suficiente
+    (>= max(10, min_frac * ciclos)).
+
+    'clase' agrupa longitudes FUSIONABLES: equivalentes en RTT respecto de la referencia de la clase (la longitud mas
+    frecuente de la clase) Y con el mismo AS-path modal (si el AS-path cambia, es un cambio de ruta real y no se
+    oculta). Las longitudes sin muestra suficiente quedan solas. Se usa solo con --fusionar-longitudes-equivalentes."""
+    n = len(tss)
+    cnt = Counter()
+    aspaths = defaultdict(Counter)
+    vals = defaultdict(list)
+    for t in tss:
+        lg, ap_ = firma[t]
+        cnt[lg] += 1
+        aspaths[lg][ap_] += 1
+        r = rtts[t].get(ult[t][0])
+        if r is not None:
+            vals[lg].append(r)
+    min_n = max(10, int(math.ceil(min_frac * n)))
+    principales = [lg for lg, c in cnt.most_common() if c >= min_n]
+    res = {"n": n, "filas": [], "pares": [], "distintas": False, "clase": dict((lg, lg) for lg in cnt),
+           "otras": n - sum(cnt[lg] for lg in principales), "min_n": min_n}
+    datos, filas = {}, {}
+    for lg in principales:
+        v = sorted(vals[lg])
+        ap_m, ap_n = aspaths[lg].most_common(1)[0]
+        fila = {"lg": lg, "n": cnt[lg], "pct": 100.0 * cnt[lg] / n, "n_rtt": len(v), "aspath": ap_m,
+                "pct_aspath": 100.0 * ap_n / cnt[lg]}
+        if v:
+            fila.update(med=cuantil(v, 0.5), p25=cuantil(v, 0.25), p75=cuantil(v, 0.75), p95=cuantil(v, 0.95),
+                        mn=v[0], mx=v[-1])
+        datos[lg], filas[lg] = v, fila
+        res["filas"].append(fila)
+
+    def comparar(x, y):
+        if not datos[x] or not datos[y]:
+            return None
+        d, p = ks_dos_muestras(datos[x], datos[y])
+        dif = filas[y]["med"] - filas[x]["med"]
+        umbral = max(dif_ms, dif_rel * min(filas[x]["med"], filas[y]["med"]))
+        return dict(a=x, b=y, D=d, p=p, dif=dif, umbral=umbral, distinta=(p < DESTINO_P_KS and abs(dif) >= umbral),
+                    mismo_aspath=(filas[x]["aspath"] == filas[y]["aspath"]))
+    cache = {}
+    for i, x in enumerate(principales):
+        for y in principales[i + 1:]:
+            c = comparar(x, y)
+            if c is not None:
+                cache[(x, y)] = cache[(y, x)] = c
+                res["pares"].append(c)
+                res["distintas"] = res["distintas"] or c["distinta"]
+    clases = []     # cada clase: lista de longitudes; la primera es la referencia (la mas frecuente)
+    for lg in principales:
+        for cl in clases:
+            # enlace completo: debe ser equivalente a TODAS las de la clase (la equivalencia no es transitiva)
+            if all(cache.get((m, lg)) is not None and not cache[(m, lg)]["distinta"] and cache[(m, lg)]["mismo_aspath"]
+                   for m in cl):
+                cl.append(lg)
+                break
+        else:
+            clases.append([lg])
+    for cl in clases:
+        for lg in cl:
+            res["clase"][lg] = cl[0]
+    res["clases"] = clases
+    res["fusionables"] = [cl for cl in clases if len(cl) > 1]
+    res["principales"] = principales
+    return res
+
+
 def main():
     ap = argparse.ArgumentParser(description="Verificacion unica de cambios de camino (eventos vs historial)")
     ap.add_argument("--historial", required=True)
@@ -153,6 +335,21 @@ def main():
     ap.add_argument("--max-hops", type=int, default=None,
                     help="Valor de --max-hops usado al extraer (default del extractor: 15); si la longitud maxima observada "
                          "lo iguala, las rutas pueden estar truncadas")
+    ap.add_argument("--dif-rtt-ms", type=float, default=1.0,
+                    help="Diferencia minima de medianas (ms) para considerar DISTINTAS dos IP finales o dos longitudes (default 1.0)")
+    ap.add_argument("--dif-rtt-rel", type=float, default=0.10,
+                    help="Diferencia minima de medianas como fraccion de la menor mediana (default 0.10 = 10%%); "
+                         "se usa el mayor de los dos umbrales")
+    ap.add_argument("--dif-long-ms", type=float, default=2.0,
+                    help="Diferencia minima de medianas (ms) para considerar DISTINTAS dos longitudes (default 2.0 = "
+                         "umbral de degradacion moderada del HDP-HMM: una diferencia menor no cambia la clasificacion)")
+    ap.add_argument("--dif-long-rel", type=float, default=0.0,
+                    help="Diferencia minima de medianas entre longitudes como fraccion de la menor mediana (default 0 = "
+                         "solo --dif-long-ms); se usa el mayor de los dos umbrales")
+    ap.add_argument("--fusionar-longitudes-equivalentes", action="store_true",
+                    help="Armar los bloques con la CLASE de longitud en lugar de la longitud: las longitudes cuyo RTT es "
+                         "equivalente (DIAGNOSTICO POR LONGITUD, mismos umbrales --dif-rtt-*) y con el mismo AS-path "
+                         "modal se tratan como una sola. Por defecto NO se fusiona (bloques por longitud)")
     ap.add_argument("--output-dir", default=".")
     ap.add_argument("--sin-html", action="store_true",
                     help="No generar el visor HTML (caminos_measurement<M>_probe<P>.html)")
@@ -327,9 +524,21 @@ def main():
 
     # ---- BLOQUES: tramos sostenidos de igual longitud separados solo por transitorios
     from datetime import datetime
-    seq = []   # [longitud, idx_ini, idx_fin]
+    # Diagnostico del RTT por longitud (se imprime mas abajo). Con --fusionar-longitudes-equivalentes la clave del
+    # bloque es la CLASE de longitud (longitudes de RTT equivalente y mismo AS-path modal); por defecto, la longitud.
+    len_diag = analizar_longitudes(tss, firma, info_dest["ult"], rtts, a.dif_long_ms, a.dif_long_rel,
+                                 min_frac=0.005)
+    if a.fusionar_longitudes_equivalentes:
+        clase_l = len_diag["clase"]
+    else:
+        clase_l = dict((lg, lg) for lg in longs)
+
+    def clave(lg):
+        return clase_l.get(lg, lg)
+
+    seq = []   # [clave (longitud o clase), idx_ini, idx_fin]
     for i, ts in enumerate(tss):
-        lg = firma[ts][0]
+        lg = clave(firma[ts][0])
         if seq and seq[-1][0] == lg:
             seq[-1][2] = i
         else:
@@ -352,13 +561,13 @@ def main():
     W("    Cadencia mediana: {0:.0f} s. Bloques: {1}; cambios entre bloques: {2}".format(
         cad_s, len(bloques), max(len(bloques) - 1, 0)))
     W("    {0:>9} {1:>20} {2:>20} {3:>9} {4:>8} {5:>10}".format("longitud", "inicio", "fin", "dur(h)", "ciclos", "fuera"))
-    modal_b = longs.most_common(1)[0][0] if longs else None
+    modal_b = clave(longs.most_common(1)[0][0]) if longs else None
     mostrados = 0
     for lg, i0, i1 in bloques:
         if lg == modal_b and len(bloques) > 12:
             continue
         n = i1 - i0 + 1
-        fuera = sum(1 for i in range(i0, i1 + 1) if firma[tss[i]][0] != lg)
+        fuera = sum(1 for i in range(i0, i1 + 1) if clave(firma[tss[i]][0]) != lg)
         W("    {0:>6} sal {1:>20} {2:>20} {3:>9.1f} {4:>8} {5:>10}".format(
             lg, tss[i0], tss[i1], n * cad_s / 3600.0, n, fuera))
         mostrados += 1
@@ -477,6 +686,76 @@ def main():
         W("  Un ultimo salto privado (RFC1918) es la red local del probe: perdida de conectividad, no un cambio de ruta.")
         W("  Revisar si el ciclo siguiente cambia de camino (recambio de ruta con perdida durante la convergencia).")
 
+    # ---- DESTINO: IP FINAL Y RTT
+    dest_ips = analizar_ips_finales(tss, ult, rtts, a.dif_rtt_ms, a.dif_rtt_rel)
+    W("")
+    W("-" * 74)
+    W("DESTINO - IP FINAL Y RTT (varias IP finales: DNS rotativo / anycast)")
+    W("-" * 74)
+    W("  Ciclos que llegaron al destino: {0}. IP finales con muestra suficiente: {1}{2}.".format(
+        dest_ips["n"], len(dest_ips["filas"]),
+        "" if not dest_ips["otras"] else " (otras IP, con pocos ciclos: {0} ciclos)".format(dest_ips["otras"])))
+    W("  {0:<34}{1:<8}{2:>7}{3:>7}{4:>9}{5:>8}{6:>8}{7:>8}".format("IP final", "ASN", "ciclos", "%", "mediana",
+                                                                  "p25", "p75", "p95"))
+    for f in dest_ips["filas"]:
+        if "med" in f:
+            W("  {0:<34}{1:<8}{2:>7}{3:>7.1f}{4:>9.2f}{5:>8.2f}{6:>8.2f}{7:>8.2f}".format(
+                f["ip"], f["asn"] or "-", f["n"], f["pct"], f["med"], f["p25"], f["p75"], f["p95"]))
+        else:
+            W("  {0:<34}{1:<8}{2:>7}{3:>7.1f}   (sin RTT)".format(f["ip"], f["asn"] or "-", f["n"], f["pct"]))
+    if len(dest_ips["filas"]) < 2:
+        W("  Una sola IP final con muestra suficiente: no hay nada que separar por destino.")
+    else:
+        esp_pct = 100.0 * dest_ips["alt_esp"] / dest_ips["n_pares"]
+        obs_pct = 100.0 * dest_ips["alt_obs"] / dest_ips["n_pares"]
+        W("  Alternancia de IP entre ciclos consecutivos: {0} de {1} ({2:.1f}%); esperada si alternaran al azar: {3:.1f}%"
+          " (razon {4:.2f}). Largo medio de racha con la misma IP: {5:.2f} ciclos.".format(
+              dest_ips["alt_obs"], dest_ips["n_pares"], obs_pct, esp_pct,
+              dest_ips["alt_obs"] / dest_ips["alt_esp"] if dest_ips["alt_esp"] else 0.0, dest_ips["racha"]))
+        for c in dest_ips["comp"]:
+            W("  {0} vs {1}: dif. de medianas {2:+.2f} ms (umbral {3:.2f} ms), KS D={4:.3f} p={5:.3f}  ->  {6}".format(
+                c["ip"], c["ref"], c["dif"], c["umbral"], c["D"], c["p"],
+                "RTT DISTINTO" if c["distinta"] else "equivalentes"))
+
+    # ---- DIAGNOSTICO POR LONGITUD
+    W("")
+    W("-" * 74)
+    W("DIAGNOSTICO POR LONGITUD - RTT del ultimo salto segun la longitud del camino")
+    W("-" * 74)
+    ld = len_diag
+    W("  Ciclos que llegaron al destino: {0}. Longitudes con muestra suficiente (>= {1} ciclos): {2}{3}.".format(
+        ld["n"], ld["min_n"], len(ld["filas"]),
+        "" if not ld["otras"] else " (otras longitudes, con pocos ciclos: {0} ciclos)".format(ld["otras"])))
+    W("  {0:>8}{1:>8}{2:>7}{3:>9}{4:>8}{5:>8}{6:>8}  {7}".format("longitud", "ciclos", "%", "mediana", "p25", "p75",
+                                                                   "p95", "AS-path modal (% de sus ciclos)"))
+    for f in ld["filas"]:
+        ap_txt = ">".join(f["aspath"]) if f["aspath"] else "(sin ASN)"
+        if "med" in f:
+            W("  {0:>8}{1:>8}{2:>7.1f}{3:>9.2f}{4:>8.2f}{5:>8.2f}{6:>8.2f}  {7} ({8:.0f}%)".format(
+                f["lg"], f["n"], f["pct"], f["med"], f["p25"], f["p75"], f["p95"], ap_txt, f["pct_aspath"]))
+        else:
+            W("  {0:>8}{1:>8}{2:>7.1f}   (sin RTT)  {3}".format(f["lg"], f["n"], f["pct"], ap_txt))
+    if len(ld["filas"]) < 2:
+        W("  Una sola longitud con muestra suficiente: no hay nada que comparar.")
+    else:
+        for c in ld["pares"]:
+            W("  {0} vs {1} saltos: dif. de medianas {2:+.2f} ms (umbral {3:.2f} ms), KS D={4:.3f} p={5:.3f}  ->  {6}{7}".format(
+                c["b"], c["a"], c["dif"], c["umbral"], c["D"], c["p"],
+                "RTT DISTINTO" if c["distinta"] else "equivalentes",
+                "" if c["mismo_aspath"] else "  [AS-path modal distinto]"))
+        if ld["fusionables"]:
+            W("  Longitudes fusionables (RTT equivalente y mismo AS-path modal): " + "; ".join(
+                "+".join(str(x) for x in cl) for cl in ld["fusionables"]))
+            if a.fusionar_longitudes_equivalentes:
+                W("  --fusionar-longitudes-equivalentes ACTIVO: los bloques se armaron con la clase de longitud (la columna")
+                W("  'longitud' del CSV de bloques es la longitud mas frecuente de la clase; 'longitudes' lista las presentes).")
+            else:
+                W("  Los bloques NO se fusionaron (por defecto, por longitud). Para fusionarlas: --fusionar-longitudes-equivalentes.")
+        else:
+            W("  Ninguna longitud es fusionable: los bloques por longitud separan niveles de RTT distintos o AS-path distintos.")
+        W("  Nota: la mediana usa todos los ciclos de cada longitud. Una longitud observada solo durante una degradacion")
+        W("  puede parecer 'distinta' sin serlo; confirmar con los bloques (bloques_longitud_*.csv) antes de decidir.")
+
     # ---- LECTURA
     W("")
     W("-" * 74)
@@ -512,6 +791,35 @@ def main():
             W("  * INCONSISTENCIA: hay diferencias entre cambio_longitud y la longitud medida del historial; revisar la regla.")
         else:
             W("  * cambio_longitud del extractor y longitud del historial coinciden ciclo a ciclo.")
+    if len(dest_ips["filas"]) >= 2:
+        r_alt = dest_ips["alt_obs"] / dest_ips["alt_esp"] if dest_ips["alt_esp"] else 0.0
+        modo = ("alternan al azar entre ciclos, tipico de DNS rotativo" if r_alt >= 0.8 else
+                "aparecen en rachas, no al azar: posible cambio de target por periodos" if r_alt < 0.5 else
+                "alternan de forma parcialmente ordenada")
+        if dest_ips["distintas"]:
+            W("  * ATENCION: las {0} IP finales tienen RTT DISTINTO; {1}. La serie mezcla {0} targets y su RTT no es".format(
+                len(dest_ips["filas"]), modo))
+            W("    una sola serie. Los bloques se arman solo por longitud y NO los separan: no analizar la serie mezclada")
+            W("    con el HDP-HMM sin separarla antes por IP final.")
+        else:
+            W("  * Hay {0} IP finales con RTT equivalente; {1}. Se tratan como un unico target; no hace falta separar".format(
+                len(dest_ips["filas"]), modo))
+            W("    la serie por IP final.")
+    if len(ld["filas"]) >= 2:
+        n_dis = sum(1 for c in ld["pares"] if c["distinta"])
+        n_eq = len(ld["pares"]) - n_dis
+        if n_dis:
+            W("  * Las longitudes tienen RTT DISTINTO en {0} de {1} pares comparados (la longitud separa niveles de RTT):".format(
+                n_dis, len(ld["pares"])))
+            W("    bloques por longitud son adecuados; unirlas mezclaria niveles de RTT en una sola serie.")
+        if ld["fusionables"]:
+            W("  * {0} par(es)/grupo(s) de longitudes son equivalentes (RTT) y con el mismo AS-path: {1}.".format(
+                len(ld["fusionables"]), "; ".join("+".join(str(x) for x in cl) for cl in ld["fusionables"])))
+            W("    {0}".format("Los bloques ya estan fusionados (--fusionar-longitudes-equivalentes)."
+                              if a.fusionar_longitudes_equivalentes else
+                              "Fusionarlas reduciria bloques cortos (opcion --fusionar-longitudes-equivalentes); no se aplico."))
+        elif not n_dis:
+            W("  * Las longitudes comparadas son equivalentes en RTT pero con AS-path modal distinto: no se fusionan.")
     cor = len(corto1) + len(corto23)
     W("  * De {0} transiciones de longitud, {1} tramos son transitorios (< {2} ciclos) y {3} sostenidos:".format(
         max(len(runs) - 1, 0), cor, P, len(sost)))
@@ -541,12 +849,16 @@ def main():
     with open(csvb, "w", newline="") if sys.version_info[0] >= 3 else open(csvb, "wb") as fb:
         wb = csv.writer(fb)
         wb.writerow(["bloque_id", "longitud", "inicio", "fin", "duracion_h", "ciclos", "fuera",
-                     "tramos_sostenidos", "longitud_modal"])
+                     "tramos_sostenidos", "longitud_modal", "ruta", "longitudes"])
         for k_, (lg, i0, i1) in enumerate(bloques):
             n_ = i1 - i0 + 1
-            fuera_ = sum(1 for i in range(i0, i1 + 1) if firma[tss[i]][0] != lg)
+            fuera_ = sum(1 for i in range(i0, i1 + 1) if clave(firma[tss[i]][0]) != lg)
+            # ciclos del bloque que pertenecen a su clave (no cuentan los 'fuera'): longitudes presentes y AS-path modal
+            dentro_ = [firma[tss[i]] for i in range(i0, i1 + 1) if clave(firma[tss[i]][0]) == lg]
+            lons_ = sorted(set(f_[0] for f_ in dentro_))
+            ruta_ = Counter(f_[1] for f_ in dentro_).most_common(1)[0][0] if dentro_ else ()
             wb.writerow([k_ + 1, lg, tss[i0], tss[i1], "{0:.1f}".format(n_ * cad_s / 3600.0), n_, fuera_,
-                         bloques_n[k_], int(lg == modal_b)])
+                         bloques_n[k_], int(lg == modal_b), ">".join(ruta_), "|".join(str(x_) for x_ in lons_)])
     W("Bloques exportados a: {0}".format(csvb))
     # Ciclos excluidos, TODOS (la consola muestra 40 de los sin destino), con la columna 'motivo':
     #   sin_destino : el ultimo salto no es el destino (seccion DESTINO NO ALCANZADO). Su RTT NO es valido.
@@ -619,6 +931,39 @@ def main():
     por_motivo = Counter(f[1][6] for f in filas)
     W("Ciclos excluidos exportados a: {0}  ({1} ciclos: {2} sin_destino, {3} parpadeo, {4} transitorio)".format(
         csve, len(filas), por_motivo["sin_destino"], por_motivo["parpadeo"], por_motivo["transitorio"]))
+    csvd = os.path.join(a.output_dir, "destinos_ip_final{0}.csv".format(suf0))
+    with open(csvd, "w", newline="") if sys.version_info[0] >= 3 else open(csvd, "wb") as fd:
+        wd = csv.writer(fd)
+        wd.writerow(["ip_final", "asn", "ciclos", "porcentaje", "rtt_mediana", "rtt_p25", "rtt_p75", "rtt_p95",
+                     "rtt_min", "rtt_max", "vs_mas_frecuente_dif_mediana_ms", "ks_D", "ks_p", "veredicto"])
+        comp = dict((c["ip"], c) for c in dest_ips["comp"])
+        for i_, f in enumerate(dest_ips["filas"]):
+            c = comp.get(f["ip"])
+            fmt_ = lambda k: "" if k not in f else "{0:.3f}".format(f[k])
+            wd.writerow([f["ip"], f["asn"], f["n"], "{0:.2f}".format(f["pct"]), fmt_("med"), fmt_("p25"), fmt_("p75"),
+                         fmt_("p95"), fmt_("mn"), fmt_("mx")] +
+                        (["{0:.3f}".format(c["dif"]), "{0:.4f}".format(c["D"]), "{0:.4f}".format(c["p"]),
+                          "distinto" if c["distinta"] else "equivalente"] if c else
+                         ["", "", "", "referencia" if i_ == 0 and len(dest_ips["filas"]) > 1 else ""]))
+    W("IP finales exportadas a: {0}  ({1} IP con muestra suficiente)".format(csvd, len(dest_ips["filas"])))
+    csvl = os.path.join(a.output_dir, "diagnostico_longitudes{0}.csv".format(suf0))
+    with open(csvl, "w", newline="") if sys.version_info[0] >= 3 else open(csvl, "wb") as fl:
+        wl = csv.writer(fl)
+        wl.writerow(["longitud", "ciclos", "porcentaje", "rtt_mediana", "rtt_p25", "rtt_p75", "rtt_p95", "rtt_min",
+                     "rtt_max", "as_path_modal", "vs_mas_frecuente_dif_mediana_ms", "umbral_ms", "ks_D", "ks_p",
+                     "veredicto", "clase_fusion", "fusionada"])
+        ref_l = ld["filas"][0]["lg"] if ld["filas"] else None
+        par_ref = dict((c["b"], c) for c in ld["pares"] if c["a"] == ref_l)
+        for i_, f in enumerate(ld["filas"]):
+            c = par_ref.get(f["lg"])
+            fmt_ = lambda k: "" if k not in f else "{0:.3f}".format(f[k])
+            wl.writerow([f["lg"], f["n"], "{0:.2f}".format(f["pct"]), fmt_("med"), fmt_("p25"), fmt_("p75"), fmt_("p95"),
+                         fmt_("mn"), fmt_("mx"), ">".join(f["aspath"])] +
+                        (["{0:.3f}".format(c["dif"]), "{0:.3f}".format(c["umbral"]), "{0:.4f}".format(c["D"]),
+                          "{0:.4f}".format(c["p"]), "distinta" if c["distinta"] else "equivalente"] if c else
+                         ["", "", "", "", "referencia" if i_ == 0 and len(ld["filas"]) > 1 else ""]) +
+                        [ld["clase"][f["lg"]], int(a.fusionar_longitudes_equivalentes and ld["clase"][f["lg"]] != f["lg"])])
+    W("Diagnostico por longitud exportado a: {0}  ({1} longitudes con muestra suficiente)".format(csvl, len(ld["filas"])))
     if not a.sin_html:
         htmlp = os.path.join(a.output_dir, "caminos{0}.html".format(suf0))
         datos = datos_visor(mid, pid, cad_s, todos, ciclos, ips, rtts, alcanzados, info_dest,
