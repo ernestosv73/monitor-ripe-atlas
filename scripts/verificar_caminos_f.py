@@ -18,12 +18,14 @@ Integra las 3 comprobaciones y las cruza en una sola salida:
   + DESTINO - IP FINAL Y RTT: cuando el ultimo salto usa mas de una IP (nombre de dominio con varias IP, DNS rotativo,
     anycast), compara el RTT entre ellas (mediana/cuartiles, prueba de Kolmogorov-Smirnov y diferencia de medianas),
     mide si alternan al azar o por rachas, y dice si son equivalentes (un solo target) o distintas (la serie mezcla
-    dos targets). Se exporta en destinos_ip_final_measurement<M>_probe<P>.csv. Los BLOQUES siguen armandose solo por
-    longitud: este informe NO separa la serie, solo avisa cuando haria falta.
+    dos targets). Se exporta en destinos_ip_final_measurement<M>_probe<P>.csv. Los BLOQUES no se separan por IP
+    final: este informe NO separa la serie, solo avisa cuando haria falta.
   + DIAGNOSTICO POR LONGITUD: compara el RTT del ultimo salto entre las longitudes de camino (mismos criterios KS +
     diferencia de medianas) y dice si son equivalentes o distintas; exporta diagnostico_longitudes_measurement<M>_probe<P>.csv.
     Por defecto NO cambia los bloques. Con --fusionar-longitudes-equivalentes los bloques se arman con la clase de
-    longitud (RTT equivalente y mismo AS-path modal). bloques_longitud_*.csv agrega 'ruta' (AS-path modal del bloque,
+    longitud (RTT equivalente y mismo AS-path modal).
+  + BLOQUES por RUTA = longitud + AS-path colapsado del ciclo: un cambio de AS-path abre un bloque nuevo aunque la
+    longitud no cambie (la columna 'ruta' del CSV lo identifica). bloques_longitud_*.csv agrega 'ruta' (AS-path modal del bloque,
     ASN unidos con '>') y 'longitudes' (longitudes presentes en el bloque, separadas por '|'); el HDP-HMM puede usar
     cualquiera de las dos como clave de referencia (--clave-referencia).
   + LECTURA: conclusiones automaticas.
@@ -348,8 +350,9 @@ def main():
                          "solo --dif-long-ms); se usa el mayor de los dos umbrales")
     ap.add_argument("--fusionar-longitudes-equivalentes", action="store_true",
                     help="Armar los bloques con la CLASE de longitud en lugar de la longitud: las longitudes cuyo RTT es "
-                         "equivalente (DIAGNOSTICO POR LONGITUD, mismos umbrales --dif-rtt-*) y con el mismo AS-path "
-                         "modal se tratan como una sola. Por defecto NO se fusiona (bloques por longitud)")
+                         "equivalente (DIAGNOSTICO POR LONGITUD, umbrales --dif-long-*) y con el mismo AS-path modal se "
+                         "tratan como una sola. Por defecto NO se fusiona (un bloque por longitud). En ambos casos un "
+                         "cambio de AS-path abre un bloque nuevo")
     ap.add_argument("--output-dir", default=".")
     ap.add_argument("--sin-html", action="store_true",
                     help="No generar el visor HTML (caminos_measurement<M>_probe<P>.html)")
@@ -536,9 +539,16 @@ def main():
     def clave(lg):
         return clase_l.get(lg, lg)
 
-    seq = []   # [clave (longitud o clase), idx_ini, idx_fin]
+    def clave_ciclo(ts):
+        """Clave de bloque de un ciclo: (longitud, AS-path colapsado). Con --fusionar-longitudes-equivalentes la
+        longitud se reemplaza por su clase. Una RUTA es longitud + AS-path: un cambio de AS-path con la misma longitud
+        (o un episodio por otro AS dentro de una longitud) abre un bloque distinto en lugar de quedar absorbido; asi la
+        fuente de verdad del HDP-HMM distingue rutas que la longitud sola no separa."""
+        return (clave(firma[ts][0]), firma[ts][1])
+
+    seq = []   # [clave de bloque, idx_ini, idx_fin]
     for i, ts in enumerate(tss):
-        lg = clave(firma[ts][0])
+        lg = clave_ciclo(ts)
         if seq and seq[-1][0] == lg:
             seq[-1][2] = i
         else:
@@ -553,21 +563,25 @@ def main():
         else:
             bloques.append(list(r))
             bloques_n.append(1)
+    bloques_clave = [b[0] for b in bloques]                       # clave completa de cada bloque
+    for b in bloques:                                             # b[0]: longitud (o clase de longitud) del bloque
+        if isinstance(b[0], tuple):
+            b[0] = b[0][0]
     dts = sorted((datetime.strptime(todos[i + 1], "%Y-%m-%d %H:%M:%S") -
                   datetime.strptime(todos[i], "%Y-%m-%d %H:%M:%S")).total_seconds() for i in range(len(todos) - 1))
     cad_s = dts[len(dts) // 2] if dts else 0.0
     W("")
-    W("  BLOQUES (tramos sostenidos de igual longitud unidos cuando los separan solo tramos transitorios):")
+    W("  BLOQUES (tramos sostenidos de igual ruta = longitud + AS-path, unidos cuando los separan solo tramos transitorios):")
     W("    Cadencia mediana: {0:.0f} s. Bloques: {1}; cambios entre bloques: {2}".format(
         cad_s, len(bloques), max(len(bloques) - 1, 0)))
     W("    {0:>9} {1:>20} {2:>20} {3:>9} {4:>8} {5:>10}".format("longitud", "inicio", "fin", "dur(h)", "ciclos", "fuera"))
     modal_b = clave(longs.most_common(1)[0][0]) if longs else None
     mostrados = 0
-    for lg, i0, i1 in bloques:
+    for k_b, (lg, i0, i1) in enumerate(bloques):
         if lg == modal_b and len(bloques) > 12:
             continue
         n = i1 - i0 + 1
-        fuera = sum(1 for i in range(i0, i1 + 1) if clave(firma[tss[i]][0]) != lg)
+        fuera = sum(1 for i in range(i0, i1 + 1) if clave_ciclo(tss[i]) != bloques_clave[k_b])
         W("    {0:>6} sal {1:>20} {2:>20} {3:>9.1f} {4:>8} {5:>10}".format(
             lg, tss[i0], tss[i1], n * cad_s / 3600.0, n, fuera))
         mostrados += 1
@@ -799,7 +813,7 @@ def main():
         if dest_ips["distintas"]:
             W("  * ATENCION: las {0} IP finales tienen RTT DISTINTO; {1}. La serie mezcla {0} targets y su RTT no es".format(
                 len(dest_ips["filas"]), modo))
-            W("    una sola serie. Los bloques se arman solo por longitud y NO los separan: no analizar la serie mezclada")
+            W("    una sola serie. Los bloques se arman por longitud y AS-path y NO los separan: no analizar la serie mezclada")
             W("    con el HDP-HMM sin separarla antes por IP final.")
         else:
             W("  * Hay {0} IP finales con RTT equivalente; {1}. Se tratan como un unico target; no hace falta separar".format(
@@ -852,9 +866,9 @@ def main():
                      "tramos_sostenidos", "longitud_modal", "ruta", "longitudes"])
         for k_, (lg, i0, i1) in enumerate(bloques):
             n_ = i1 - i0 + 1
-            fuera_ = sum(1 for i in range(i0, i1 + 1) if clave(firma[tss[i]][0]) != lg)
+            fuera_ = sum(1 for i in range(i0, i1 + 1) if clave_ciclo(tss[i]) != bloques_clave[k_])
             # ciclos del bloque que pertenecen a su clave (no cuentan los 'fuera'): longitudes presentes y AS-path modal
-            dentro_ = [firma[tss[i]] for i in range(i0, i1 + 1) if clave(firma[tss[i]][0]) == lg]
+            dentro_ = [firma[tss[i]] for i in range(i0, i1 + 1) if clave_ciclo(tss[i]) == bloques_clave[k_]]
             lons_ = sorted(set(f_[0] for f_ in dentro_))
             ruta_ = Counter(f_[1] for f_ in dentro_).most_common(1)[0][0] if dentro_ else ()
             wb.writerow([k_ + 1, lg, tss[i0], tss[i1], "{0:.1f}".format(n_ * cad_s / 3600.0), n_, fuera_,
