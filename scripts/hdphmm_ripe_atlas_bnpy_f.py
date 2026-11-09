@@ -8,6 +8,13 @@ HDP-HMM con bnpy para Segmentación de Latencia en RIPE Atlas (v5)
 + Agrupamiento de Segmentos Consecutivos por Tipo de Degradación
 =============================================================================
 Cambios respecto de v5:
+  8. --clave-referencia {longitud_ruta (default), longitud, ruta}: define que es "la misma ruta" para el RTT de
+     referencia y el agrupamiento de segmentos. Una ruta es longitud + AS-path (columna 'ruta' del CSV de bloques de
+     verificar_caminos.py, que ahora separa bloques por cambio de AS-path aunque la longitud no cambie). Sin esa columna,
+     'longitud_ruta' equivale a 'longitud'. cambios_de_ruta_*.csv agrega ruta_anterior y ruta_siguiente.
+     El CSV de bloques puede traer ademas 'longitudes' (p. ej. 8|9, con --fusionar-longitudes-equivalentes de
+     verificar_caminos.py): el bloque incluye los ciclos de todas esas longitudes. Ambas columnas son opcionales (CSV
+     anteriores siguen funcionando). segmentos_caracterizados_*.csv agrega 'clave_referencia' al final.
   1. --interval (segundos entre ciclos, obligatorio): duracion_minutos = n_ciclos * interval / 60
      (antes estaba fijo en 10 min por ciclo).
   2. --ciclos-excluidos (obligatorio): CSV ciclos_excluidos_measurement<M>_probe<P>.csv de verificar_caminos.py.
@@ -211,15 +218,30 @@ def cargar_bloques_desde_csv(bloques_path):
     """
     Lee directamente el CSV de bloques generado por verificar_caminos.py.
     Estructura esperada: bloque_id,longitud,inicio,fin,duracion_h,ciclos,fuera,tramos_sostenidos,longitud_modal
+    [,ruta,longitudes]  (las dos ultimas son opcionales)
     """
     print("[FASE 1b] Cargando bloques desde: {}".format(bloques_path))
     df = pd.read_csv(bloques_path)
     
     bloques = []
+    tiene_ruta = 'ruta' in df.columns
+    tiene_longitudes = 'longitudes' in df.columns
     for idx, row in df.iterrows():
+        # 'ruta' (AS-path modal) y 'longitudes' (longitudes presentes, p. ej. "8|9") son opcionales: los CSV de
+        # versiones anteriores de verificar_caminos.py no las traen. Sin 'longitudes', el bloque es de su 'longitud'.
+        ruta = str(row['ruta']) if tiene_ruta and pd.notnull(row['ruta']) else ''
+        if tiene_longitudes and pd.notnull(row['longitudes']):
+            lons = set(int(float(x)) for x in str(row['longitudes']).split('|') if x.strip())
+        else:
+            lons = set()
+        if not lons:
+            lons = set([int(row['longitud'])])
         bloques.append({
             'bloque_id': int(row['bloque_id']),
             'longitud': int(row['longitud']),
+            'longitudes': lons,
+            'ruta': ruta,
+            'tiene_ruta': tiene_ruta,
             'inicio': str(row['inicio']),
             'fin': str(row['fin']),
             'ciclos': int(row['ciclos']),
@@ -245,7 +267,7 @@ def extraer_sub_serie(serie_completa, bloque, excluidos_en_bloque=0):
     """
     inicio_str = bloque['inicio']
     fin_str = bloque['fin']
-    longitud = bloque['longitud']
+    longitudes_bloque = bloque.get('longitudes') or set([bloque['longitud']])
     ciclos_esperados = bloque['ciclos'] - excluidos_en_bloque
 
     window = [(ts, rtt, lon) for ts, rtt, lon in serie_completa if inicio_str <= ts <= fin_str]
@@ -259,8 +281,9 @@ def extraer_sub_serie(serie_completa, bloque, excluidos_en_bloque=0):
               "sean de la misma corrida de verificar_caminos."
               .format(len(window), inicio_str, fin_str, ciclos_esperados, bloque['ciclos'], excluidos_en_bloque))
 
-    # Filtrar solo las mediciones que coinciden con la longitud del bloque (el target real)
-    sub_serie = [(ts, rtt) for ts, rtt, lon in window if lon == longitud]
+    # Filtrar solo las mediciones de la(s) longitud(es) del bloque (el target real). Un bloque armado con
+    # --fusionar-longitudes-equivalentes de verificar_caminos.py trae varias (columna 'longitudes', p. ej. 8|9).
+    sub_serie = [(ts, rtt) for ts, rtt, lon in window if lon in longitudes_bloque]
 
     return sub_serie
 
@@ -548,8 +571,24 @@ def clasificar_tipo_degradacion(segmento, rtt_referencia):
     else: return 'variacion_normal'
 
 
+def clave_referencia(bloque, modo):
+    """Clave que define "la misma ruta" para la referencia de RTT y el agrupamiento de segmentos.
+    'longitud_ruta' (default): longitud + AS-path del bloque, p. ej. 'L7:1273>2906>40027' (una ruta es longitud y
+    AS-path: dos bloques con la misma longitud pero distinto AS-path son rutas distintas). Si el CSV de bloques no trae
+    la columna 'ruta' (version anterior de verificar_caminos.py), se usa la longitud (int).
+    'longitud': solo la longitud (int). 'ruta': solo el AS-path ('L<longitud>' si el bloque no lo trae)."""
+    if modo == 'longitud_ruta':
+        if not bloque.get('tiene_ruta'):
+            return bloque['longitud']
+        return 'L{}:{}'.format(bloque['longitud'], bloque.get('ruta', ''))
+    if modo == 'ruta':
+        return bloque.get('ruta') or 'L{}'.format(bloque['longitud'])
+    return bloque['longitud']
+
+
 def calcular_referencias_por_ruta(rtts_por_longitud):
-    """RTT de referencia (P25) de cada ruta, usando los ciclos de todos los bloques con esa longitud."""
+    """RTT de referencia (P25) por clave de ruta (longitud o AS-path, ver clave_referencia), usando los ciclos de
+    todos los bloques con esa clave."""
     return dict((lon, float(np.percentile(rtts, 25))) for lon, rtts in rtts_por_longitud.items() if rtts)
 
 
@@ -580,6 +619,7 @@ def detectar_cambios_de_ruta(info_bloques, ventana):
         cambios.append({
             'timestamp': sig['start_ts'], 'bloque_anterior': ant['bloque_id'], 'bloque_siguiente': sig['bloque_id'],
             'longitud_anterior': ant['longitud'], 'longitud_siguiente': sig['longitud'],
+            'ruta_anterior': ant.get('ruta', ''), 'ruta_siguiente': sig.get('ruta', ''),
             'rtt_antes': antes, 'rtt_despues': despues, 'delta_rtt': delta,
             'tipo_cambio': clasificar_cambio_rtt(delta), 'ventana': w})
     return cambios
@@ -607,9 +647,9 @@ def agrupar_segmentos_consecutivos(segmentos):
     current_group = []
     
     for seg in segmentos:
-        # Solo se agrupan segmentos del mismo tipo Y de la misma ruta (longitud): la referencia es por ruta
+        # Solo se agrupan segmentos del mismo tipo Y de la misma ruta (clave de referencia): la referencia es por ruta
         if (not current_group or (current_group[-1]['tipo_degradacion'] == seg['tipo_degradacion']
-                                  and current_group[-1].get('longitud') == seg.get('longitud'))):
+                                  and current_group[-1].get('clave_ref') == seg.get('clave_ref'))):
             current_group.append(seg)
         else:
             grupos_raw.append(current_group)
@@ -683,14 +723,15 @@ def exportar_resultados(serie_completa, secuencias, estados_por_secuencia, estad
         writer = csv.writer(f)
         writer.writerow(['seq_id', 'estado', 'start_ts', 'end_ts', 'n_ciclos', 'duracion_minutos',
                         'media', 'mediana', 'std', 'min', 'max', 'tipo_degradacion',
-                        'bloque_id', 'longitud', 'rtt_referencia', 'desviacion_ms'])
+                        'bloque_id', 'longitud', 'rtt_referencia', 'desviacion_ms', 'clave_referencia'])
         for seg in segmentos:
             writer.writerow([seg['seq_id'], seg['estado'], seg['start_ts'], seg['end_ts'],
                            seg['n_ciclos'], fmt_min(seg['duracion_minutos']), "{:.3f}".format(seg['media']),
                            "{:.3f}".format(seg['mediana']), "{:.3f}".format(seg['std']),
                            "{:.3f}".format(seg['min']), "{:.3f}".format(seg['max']), seg['tipo_degradacion'],
                            seg.get('bloque_id', ''), seg.get('longitud', ''),
-                           "{:.3f}".format(seg['rtt_referencia']), "{:.3f}".format(seg['desviacion_ms'])])
+                           "{:.3f}".format(seg['rtt_referencia']), "{:.3f}".format(seg['desviacion_ms']),
+                           seg.get('clave_ref', '')])
     print("  - Segmentos caracterizados: {}".format(path_segmentos))
     
     # 2b. Segmentos caracterizados AGRUPADOS
@@ -715,12 +756,14 @@ def exportar_resultados(serie_completa, secuencias, estados_por_secuencia, estad
     with open(path_cr, 'w') as f:
         writer = csv.writer(f)
         writer.writerow(['timestamp', 'bloque_anterior', 'bloque_siguiente', 'longitud_anterior', 'longitud_siguiente',
-                        'delta_saltos', 'rtt_antes_ms', 'rtt_despues_ms', 'delta_rtt_ms', 'tipo_cambio', 'ciclos_ventana'])
+                        'delta_saltos', 'rtt_antes_ms', 'rtt_despues_ms', 'delta_rtt_ms', 'tipo_cambio', 'ciclos_ventana',
+                        'ruta_anterior', 'ruta_siguiente'])
         for c in cambios_ruta:
             writer.writerow([c['timestamp'], c['bloque_anterior'], c['bloque_siguiente'], c['longitud_anterior'],
                            c['longitud_siguiente'], c['longitud_siguiente'] - c['longitud_anterior'],
                            "{:.3f}".format(c['rtt_antes']), "{:.3f}".format(c['rtt_despues']),
-                           "{:.3f}".format(c['delta_rtt']), c['tipo_cambio'], c['ventana']])
+                           "{:.3f}".format(c['delta_rtt']), c['tipo_cambio'], c['ventana'],
+                           c.get('ruta_anterior', ''), c.get('ruta_siguiente', '')])
     print("  - Cambios de ruta: {} ({} cambios)".format(path_cr, len(cambios_ruta)))
     
     # 3. Puntos de cambio
@@ -767,9 +810,9 @@ def exportar_resultados(serie_completa, secuencias, estados_por_secuencia, estad
         f.write("Ratio de calidad: {:.4f}\nDuración media de segmentos: {:.2f} minutos\n\n".format(
             metricas_calidad['ratio_calidad'], metricas_calidad['duracion_media_segmentos']))
         
-        f.write("--- RTT DE REFERENCIA POR RUTA (P25 de los bloques con la misma longitud) ---\n")
+        f.write("--- RTT DE REFERENCIA POR RUTA (P25 de los bloques con la misma clave de referencia) ---\n")
         for lon in sorted((referencias or {}).keys()):
-            f.write("  {} saltos: {:.2f} ms\n".format(lon, referencias[lon]))
+            f.write("  {}: {:.2f} ms\n".format(lon, referencias[lon]))
         f.write("\n--- CAMBIOS DE RUTA ---\nCambios de ruta clasificados: {}\n".format(len(cambios_ruta)))
         for c in cambios_ruta:
             f.write("  B{}->B{} ({}->{} saltos): {:.2f} -> {:.2f} ms (delta {:+.2f}) {}\n".format(
@@ -811,6 +854,12 @@ def main():
     parser.add_argument('--percentil-outliers', type=float, default=0.0,
                         help='Descarta por bloque los ciclos con RTT por encima de este percentil (p. ej. 99). '
                              'Default 0 = sin filtro (el filtro borra ciclos del propio evento degradado)')
+    parser.add_argument('--clave-referencia', choices=['longitud_ruta', 'longitud', 'ruta'], default='longitud_ruta',
+                        help="Que define 'la misma ruta' para el RTT de referencia (P25) y el agrupamiento: "
+                             "'longitud_ruta' (default: longitud + AS-path del bloque; sin columna 'ruta' en el CSV de "
+                             "bloques equivale a 'longitud'), 'longitud' (solo cantidad de saltos) o 'ruta' (solo AS-path: "
+                             "longitudes distintas con el mismo AS-path comparten referencia; usar solo si no hay "
+                             "diferencias de RTT por longitud, ver DIAGNOSTICO POR LONGITUD de verificar_caminos)")
     parser.add_argument('--ventana-borde', type=int, default=10,
                         help='Ciclos a cada lado de la frontera entre bloques para medir el cambio de RTT de un '
                              'cambio de ruta (mediana de los ultimos/primeros N ciclos; default 10)')
@@ -840,6 +889,11 @@ def main():
     serie_completa, longitudes, cambios_longitud = cargar_csv_crudo(args.crudo, dest_hop=args.dest_hop,
                                                                     excluidos=excluidos)
     bloques = cargar_bloques_desde_csv(args.bloques_csv)
+    if args.clave_referencia != 'longitud' and not any(b['tiene_ruta'] for b in bloques):
+        print("[AVISO] --clave-referencia {}, pero el CSV de bloques no trae la columna 'ruta' (version anterior de "
+              "verificar_caminos.py): {}.".format(args.clave_referencia, "se usa la longitud"
+                                                  if args.clave_referencia == 'longitud_ruta' else "se usa 'L<longitud>'"))
+    print("  - Clave de referencia: {}".format(args.clave_referencia))
     
     if not serie_completa or not bloques:
         print("[ERROR] No se pudieron cargar los datos o bloques."); sys.exit(1)
@@ -886,8 +940,9 @@ def main():
         print("    → Ciclos extraídos para análisis: {}".format(len(sub_serie)))
         
         rtts_sub = [rtt for _, rtt in sub_serie]
-        rtts_por_longitud[bloque['longitud']].extend(rtts_sub)
+        rtts_por_longitud[clave_referencia(bloque, args.clave_referencia)].extend(rtts_sub)
         info_bloques.append({'idx': idx, 'bloque_id': bloque['bloque_id'], 'longitud': bloque['longitud'],
+                             'ruta': bloque.get('ruta', ''),
                              'start_ts': sub_serie[0][0], 'n': len(rtts_sub),
                              'rtts_ini': rtts_sub[:args.ventana_borde], 'rtts_fin': rtts_sub[-args.ventana_borde:]})
         
@@ -930,6 +985,7 @@ def main():
         for seg in segmentos:
             seg['bloque_id'] = bloque['bloque_id']
             seg['longitud'] = bloque['longitud']
+            seg['clave_ref'] = clave_referencia(bloque, args.clave_referencia)
         todos_segmentos.extend(segmentos)
         
         # Change-points
@@ -944,14 +1000,16 @@ def main():
     # RTT de referencia POR RUTA y clasificacion con signo
     rtts = [rtt for _, rtt, _ in serie_completa]
     referencias = calcular_referencias_por_ruta(rtts_por_longitud)
-    print("\n  - RTT de referencia por ruta (P25 de los ciclos de los bloques con la misma longitud):")
+    print("\n  - RTT de referencia por ruta (P25 de los ciclos de los bloques con la misma clave: {}):".format(
+        args.clave_referencia))
     for lon in sorted(referencias):
-        print("      {} saltos: {:.2f} ms ({} ciclos)".format(lon, referencias[lon], len(rtts_por_longitud[lon])))
+        print("      {}{}: {:.2f} ms ({} ciclos)".format(lon, " saltos" if isinstance(lon, int) else "",
+                                                       referencias[lon], len(rtts_por_longitud[lon])))
     print("  - (Informativo) P25 global de la serie, que ya no se usa para clasificar: {:.2f}ms".format(
         np.percentile(rtts, 25)))
     
     for seg in todos_segmentos:
-        ref = referencias[seg['longitud']]
+        ref = referencias[seg['clave_ref']]
         seg['rtt_referencia'] = ref
         seg['desviacion_ms'] = seg['mediana'] - ref
         seg['tipo_degradacion'] = clasificar_tipo_degradacion(seg, ref)
