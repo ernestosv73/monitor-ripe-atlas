@@ -8,6 +8,8 @@ HDP-HMM con bnpy para Segmentación de Latencia en RIPE Atlas (v5)
 + Agrupamiento de Segmentos Consecutivos por Tipo de Degradación
 =============================================================================
 Cambios respecto de v5:
+  9. Se elimina el calculo de calidad de la segmentacion (calcular_calidad_segmentacion: varianza intra/inter, ratio de
+     calidad y duracion media de segmentos), que no es una referencia valida. Ya no se imprime ni se escribe en el resumen.
   8. --clave-referencia {longitud_ruta (default), longitud, ruta}: define que es "la misma ruta" para el RTT de
      referencia y el agrupamiento de segmentos. Una ruta es longitud + AS-path (columna 'ruta' del CSV de bloques de
      verificar_caminos.py, que ahora separa bloques por cambio de AS-path aunque la longitud no cambie). Sin esa columna,
@@ -538,21 +540,6 @@ def _procesar_segmento(serie_completa, seq, start_idx, end_idx, seq_id, estado, 
         'std': float(np.std(rtts_seg)), 'min': float(np.min(rtts_seg)), 'max': float(np.max(rtts_seg))
     }
 
-def calcular_calidad_segmentacion(serie_completa, segmentos):
-    rtts = [rtt for _, rtt, _ in serie_completa]
-    media_global = np.mean(rtts)
-    n_total = len(rtts)
-    
-    var_intra = sum((seg['n_ciclos'] / n_total) * (seg['std'] ** 2) for seg in segmentos)
-    var_inter = sum((seg['n_ciclos'] / n_total) * ((seg['media'] - media_global) ** 2) for seg in segmentos)
-    
-    return {
-        'varianza_intra': var_intra, 'varianza_inter': var_inter,
-        'ratio_calidad': var_inter / max(var_intra, 1e-10),
-        'duracion_media_segmentos': np.mean([s['duracion_minutos'] for s in segmentos]),
-        'n_segmentos': len(segmentos)
-    }
-
 def clasificar_tipo_degradacion(segmento, rtt_referencia):
     """
     Clasifica un segmento contra el RTT de referencia de su ruta (no contra un valor global).
@@ -700,7 +687,7 @@ def agrupar_segmentos_consecutivos(segmentos):
 # FASE 6: EXPORTACIÓN
 # ============================================================================
 def exportar_resultados(serie_completa, secuencias, estados_por_secuencia, estados_suaves_por_secuencia,
-                        change_points, segmentos, metricas_calidad, output_dir, measurement_id, probe_id,
+                        change_points, segmentos, output_dir, measurement_id, probe_id,
                         longitudes=None, cambios_longitud=None, tipo_fusion=None, mapa_fusion=None,
                         cambios_ruta=None, referencias=None):
     print("[FASE 6] Exportando resultados a: {}".format(output_dir))
@@ -805,11 +792,7 @@ def exportar_resultados(serie_completa, secuencias, estados_por_secuencia, estad
         for tipo, count in sorted(tipo_counts_agrup.items(), key=lambda x: -x[1]):
             f.write("  {}: {} grupos\n".format(tipo, count))
         
-        f.write("\n--- MÉTRICAS DE CALIDAD ---\nVarianza intra-segmento: {:.4f}\nVarianza inter-segmento: {:.4f}\n".format(
-            metricas_calidad['varianza_intra'], metricas_calidad['varianza_inter']))
-        f.write("Ratio de calidad: {:.4f}\nDuración media de segmentos: {:.2f} minutos\n\n".format(
-            metricas_calidad['ratio_calidad'], metricas_calidad['duracion_media_segmentos']))
-        
+        f.write("\n")
         f.write("--- RTT DE REFERENCIA POR RUTA (P25 de los bloques con la misma clave de referencia) ---\n")
         for lon in sorted((referencias or {}).keys()):
             f.write("  {}: {:.2f} ms\n".format(lon, referencias[lon]))
@@ -1021,15 +1004,12 @@ def main():
             c['bloque_anterior'], c['bloque_siguiente'], c['longitud_anterior'], c['longitud_siguiente'],
             c['rtt_antes'], c['rtt_despues'], c['delta_rtt'], c['tipo_cambio']))
         
-    metricas_calidad = calcular_calidad_segmentacion(serie_completa, todos_segmentos)
-    print("  - Ratio de calidad global: {:.2f}".format(metricas_calidad['ratio_calidad']))
-    
     print("  - Puntos de cambio detectados: {}".format(len(todos_change_points)))
     
     # Exportar
     exportar_resultados(
         serie_completa, secuencias_global, estados_por_secuencia_global, estados_suaves_por_secuencia_global,
-        todos_change_points, todos_segmentos, metricas_calidad, args.output_dir,
+        todos_change_points, todos_segmentos, args.output_dir,
         measurement_id, probe_id, longitudes=longitudes, cambios_longitud=cambios_longitud,
         tipo_fusion=tipo_fusion, mapa_fusion=mapa_fusion, cambios_ruta=cambios_ruta, referencias=referencias)
     
