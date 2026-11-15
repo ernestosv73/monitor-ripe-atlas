@@ -22,3 +22,7 @@ pip install ipwhois --break-system-packages
 sleep 1
 pip install ruptures
 sleep 1
+pip install tsbootstrap
+sleep 1
+pip install statsmodels
+sleep 1
