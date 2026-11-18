@@ -24,3 +24,5 @@ pip install tsbootstrap
 sleep 1
 pip install statsmodels
 sleep 1
+pip install matplotlib
+sleep 1
